@@ -1,4 +1,4 @@
-import { BUCKETS, LEVELS, belongs, defaultCounts, flattenHistory, skillStats, smartMix, eligiblePool, selectTest } from './engine.mjs';
+import { BUCKETS, MATH_BUCKETS, bucketsFor, inCollection, answerMatches, validResponse, LEVELS, belongs, defaultCounts, flattenHistory, skillStats, smartMix, eligiblePool, selectTest } from './engine.mjs';
 import { mountAuth } from './auth.mjs';
 import { AccountStore } from './account-store.mjs';
 
@@ -9,11 +9,13 @@ const fmt = n => `${Math.floor(Math.max(0,n)/60)}:${String(Math.floor(Math.max(0
 const percent = (a,b) => b ? Math.round(a/b*100) : 0;
 const date = ts => new Date(ts).toLocaleString('en-US', { timeZone:'Asia/Dushanbe', month:'short', day:'numeric', year:'numeric', hour:'numeric', minute:'2-digit' });
 let bank;
-try { const response = await fetch('bank.json'); if (!response.ok) throw Error(); bank = await response.json(); }
+try { const response = await fetch('bank.json'); if (!response.ok) throw Error(); bank = await response.json(); const mathResponse=await fetch('math-bank.json'); if(!mathResponse.ok)throw Error(); bank.push(...await mathResponse.json()); }
 catch { $('#app').innerHTML = '<div class="notice">The question bank could not be loaded. Run the local server and reload this page.</div>'; throw Error('Question bank unavailable'); }
 const byId = Object.fromEntries(bank.map(q => [q.id,q]));
 const domains = [...new Set(bank.map(q => q.domain))];
-const builderBuckets = ['ideas','craft','transitions','synthesis','conventions'].map(id => BUCKETS.find(b => b.id === id));
+const englishBuckets = ['ideas','craft','transitions','synthesis','conventions'].map(id => BUCKETS.find(b => b.id === id));
+const collectionBank = () => bank.filter(q=>inCollection(q,builder));
+const allBuckets=[...BUCKETS,...MATH_BUCKETS];
 const STORE = 'qbank-focus-v1';
 let data={history:[],active:null}, accountStore=null, account=null, authController=null, appReady=false, accountEpoch=0;
 function loadLocalDemo() {
@@ -34,8 +36,8 @@ $('#sync-toolbar').hidden=true;
 render(false);
 }
 let screen = 'create', moreOpen=false, notesOpen=false, eliminator=false, readingSize=18, storageWarning=false, pendingHighlight=null;
-let builder = { counts:defaultCounts(), pool:'all', tutor:false, timed:true, minutes:35, name:'', telemetry:false,
-  skills:Object.fromEntries(BUCKETS.map(b=>[b.id,[...new Set(bank.filter(q=>belongs(q,b)).map(q=>q.skill))]])), expanded:[] };
+let builder = { source:'college-board', section:'Reading and Writing', counts:defaultCounts(), pool:'all', tutor:false, timed:true, minutes:35, name:'', telemetry:false,
+  skills:Object.fromEntries(allBuckets.map(b=>[b.id,[...new Set(bank.filter(q=>belongs(q,b)).map(q=>q.skill))]])), expanded:[] };
 const skillDescriptions = {
   'Central Ideas and Details':'Main idea and key details', 'Inferences':'Conclusions supported by the passage',
   'Command of Evidence':'Textual and quantitative evidence', 'Words in Context':'Vocabulary in context',
@@ -52,7 +54,7 @@ function save() {
 }
 function sessionRows(s) { return s.ids.map(id=>({ id,...s.responses[id] })); }
 function allRows(history=data.history) { return flattenHistory(history,byId); }
-function isCorrect(r) { return r.answer===byId[r.id]?.answer; }
+function isCorrect(r) { return answerMatches(byId[r.id],r.answer); }
 function tally(rows) { const correct=rows.filter(isCorrect).length, omitted=rows.filter(r=>!r.answer).length; return { total:rows.length,correct,omitted,incorrect:rows.length-correct-omitted,accuracy:percent(correct,rows.length) }; }
 function currentQ() { return data.active && byId[data.active.ids[data.active.index]]; }
 function currentR() { return data.active && data.active.responses[currentQ().id]; }
@@ -61,19 +63,25 @@ function metric(label,value,sub='') { return `<div class="metric"><span>${label}
 function statusFor(r) { return !r.answer?'<span class="status omitted">Omitted</span>':isCorrect(r)?'<span class="status">Correct</span>':'<span class="status incorrect">Incorrect</span>'; }
 function skillSort(a,b) { return a.accuracy-b.accuracy || b.total-a.total; }
 
-function builderPool() { return eligiblePool(bank,data.history,byId,builder.pool); }
+function explanation(q) { return q.rationaleImages ? q.rationaleImages.map((src,i)=>`<img class="math-explanation-image" src="${esc(src)}" alt="College Board worked explanation for ${q.id}, part ${i+1}" loading="lazy"><a class="math-zoom" href="${esc(src)}" target="_blank" rel="noopener">Open explanation at full size ↗</a>`).join('') : esc(q.rationale); }
+function collectionPicker() {
+  return `<section class="collection-picker" aria-label="Question bank"><div class="collection-intro"><div><span class="eyebrow">YOUR PRACTICE LIBRARY</span><h2>Choose your question bank</h2><p>One focused session. A little more confidence.</p></div>${icon('library-big')}</div><div class="collection-tabs" role="group" aria-label="Question bank source">${[['college-board','College Board','Official SAT question bank','graduation-cap'],['uworld','UWorld','Your next question collection','layers']].map(([id,label,sub,glyph])=>`<button type="button" data-collection="${id}" class="collection-tab ${builder.source===id?'selected':''}" aria-pressed="${builder.source===id}">${icon(glyph)}<span><strong>${label}</strong><small>${sub}</small></span><span class="collection-tag">${id==='uworld'?'Coming soon':bank.filter(q=>(q.source||'college-board')===id).length+' questions'}</span></button>`).join('')}</div>${builder.source==='college-board'?`<div class="subject-tabs" role="group" aria-label="SAT subject">${[['Reading and Writing','Reading & Writing','book-open'],['Math','Math','calculator']].map(([id,label,glyph])=>`<button type="button" data-section="${id}" class="${builder.section===id?'selected':''}" aria-pressed="${builder.section===id}">${icon(glyph)}${label}<span>${bank.filter(q=>q.section===id).length}</span></button>`).join('')}</div>`:''}</section>`;
+}
+function builderPool() { return eligiblePool(collectionBank(),data.history,byId,builder.pool); }
 function builderPage() {
-  const pool=builderPool(), stats=skillStats(allRows(),byId);
+  const pool=builderPool(), stats=skillStats(allRows(),byId), builderBuckets=builder.section==='Math'?MATH_BUCKETS:englishBuckets;
+  const collection=collectionPicker();
+  if(builder.source==='uworld')return collection+`<section class="collection-empty">${icon('library-big')}<span class="eyebrow">YOUR NEXT COLLECTION</span><h2>UWorld QBank</h2><p>A separate space for your UWorld questions.<br>Send the files when you’re ready to add them.</p><span class="coming-badge">Awaiting your files</span></section>`;
   const selectedTotal=Object.values(builder.counts).reduce((a,b)=>a+Number(b||0),0);
-  return `${data.active?`<div class="notice row"><span>A test is in progress: <strong>${esc(data.active.name)}</strong></span><a href="#practice" class="button">Resume Test</a></div>`:''}
+  return `${collection}${data.active?`<div class="notice row"><span>A test is in progress: <strong>${esc(data.active.name)}</strong></span><a href="#practice" class="button">Resume Test</a></div>`:''}
   <form id="builder-form" novalidate>
     <section class="section"><h2 class="section-title">Test Mode ${icon('info')}</h2><div class="section-body"><div class="mode-row">
       <label class="switch-label"><input type="checkbox" name="tutor" ${builder.tutor?'checked':''}><span class="switch"></span>Tutor</label>
       <label class="switch-label"><input type="checkbox" name="timed" ${builder.timed?'checked':''}><span class="switch"></span>Timed</label>
       <label class="field-inline" id="minutes-field" ${builder.timed?'':'hidden'}>Time limit <input type="number" name="minutes" value="${builder.minutes}" min="1" max="180" aria-label="Time limit in minutes"> min</label>
     </div><p class="mode-description" id="mode-description">${builder.tutor?'Answers and explanations are available after you submit each response.':'Answers and explanations are available after you finish the test.'}</p></div>
-    <h2 class="section-title">Question Mode ${icon('info')}</h2><div class="section-body question-modes">${[['all','All'],['unused','Unused'],['incorrect','Incorrect'],['marked','Marked']].map(([v,label])=>`<label><input type="radio" name="pool" value="${v}" ${builder.pool===v?'checked':''}>${label}<span class="count-pill">${eligiblePool(bank,data.history,byId,v).length}</span></label>`).join('')}</div></section>
-    <section class="section"><h2 class="section-title">Subjects &amp; Question Counts</h2><div class="topic-head"><span>Reading and Writing</span><span>Available</span><span>Questions</span></div>
+    <h2 class="section-title">Question Mode ${icon('info')}</h2><div class="section-body question-modes">${[['all','All'],['unused','Unused'],['incorrect','Incorrect'],['marked','Marked']].map(([v,label])=>`<label><input type="radio" name="pool" value="${v}" ${builder.pool===v?'checked':''}>${label}<span class="count-pill">${eligiblePool(collectionBank(),data.history,byId,v).length}</span></label>`).join('')}</div></section>
+    <section class="section"><h2 class="section-title">Subjects &amp; Question Counts</h2><div class="topic-head"><span>${builder.section}</span><span>Available</span><span>Questions</span></div>
     ${builderBuckets.map(b=>{
       const available=pool.filter(q=>belongs(q,b)&&builder.skills[b.id].includes(q.skill)).length;
       const skills=[...new Set(bank.filter(q=>belongs(q,b)).map(q=>q.skill))],expanded=builder.expanded.includes(b.id);
@@ -91,13 +99,14 @@ function startTest() {
   try {
     const picked=selectTest(bank,data.history,builder);
     const responses=Object.fromEntries(picked.ids.map(id=>[id,{answer:null,seconds:0,changes:[],visits:0,clicks:0,scrolls:0,points:[],flag:false,locked:false,eliminated:[],notes:'',highlights:[]}]));
-    data.active={id:crypto.randomUUID(),name:builder.name.trim()||`Practice ${data.history.length+1}`,created:Date.now(),ids:picked.ids,index:0,responses,mode:builder.tutor?'tutor':'exam',timed:builder.timed,remaining:builder.timed?Number(builder.minutes)*60:0,paused:false,telemetry:builder.telemetry,composition:picked.composition,selection:picked.mix,fallbacks:picked.fallbacks,config:structuredClone(builder),lastTick:Date.now()};
+    data.active={id:crypto.randomUUID(),name:builder.name.trim()||`${builder.section==='Math'?'Math':'Reading & Writing'} Practice ${data.history.length+1}`,created:Date.now(),ids:picked.ids,index:0,responses,mode:builder.tutor?'tutor':'exam',timed:builder.timed,remaining:builder.timed?Number(builder.minutes)*60:0,paused:false,telemetry:builder.telemetry,composition:picked.composition,selection:picked.mix,fallbacks:picked.fallbacks,config:structuredClone(builder),lastTick:Date.now()};
     if(builder.timed&&(!Number.isFinite(+builder.minutes)||+builder.minutes<1||+builder.minutes>180)) { data.active=null;throw Error('Set a time limit between 1 and 180 minutes.'); }
     currentR().visits++;save();location.hash='practice';
   } catch(err) { $('#builder-error').textContent=err.message;$('#builder-error').scrollIntoView({block:'nearest'}); }
 }
 
 function splitQuestion(q) {
+  if(q.section==='Math')return {source:q.passage||'',prompt:q.responseType==='numeric'?'Enter your answer.':'Select the answer shown in the question.'};
   const raw=q.passage;
   let start=-1;
   if(q.skill==='Rhetorical Synthesis') start=raw.lastIndexOf('The student');
@@ -107,6 +116,7 @@ function splitQuestion(q) {
   return {source:raw.slice(0,start).trim(),prompt:raw.slice(start).replace(/\s+/g,' ').trim()};
 }
 function formattedSource(q,raw,highlights=[]) {
+  if(q.questionImages)return q.questionImages.map((src,i)=>`<img class="math-question-image" src="${esc(src)}" alt="Original math question ${q.id}, part ${i+1}"><a class="math-zoom" href="${esc(src)}" target="_blank" rel="noopener">Open question at full size ↗</a>`).join('');
   const lines=raw.split('\n'), poetic=lines.length>5&&lines.filter(l=>l.length<75).length/lines.length>.65&&q.skill!=='Rhetorical Synthesis';
   let text=esc(poetic?raw:raw.replace(/\s+/g,' '));
   for(const u of q.underlines||[]) { const phrase=esc(poetic?u:u.replace(/\s+/g,' '));if(phrase.length>3)text=text.replace(phrase,`<u>${phrase}</u>`); }
@@ -124,11 +134,12 @@ function examPage() {
   if(!s)return '<div class="empty"><p>No test in progress.</p><a class="button primary" href="#create">Create Test</a></div>';
   if(s.paused)return `<div class="paused-screen"><div class="paused-card"><h1>Test paused</h1><p>${esc(s.name)}<br>Your answers are saved on this device.</p><button class="exam-button" data-action="resume">Resume Test</button><p style="margin:22px 0 0"><a href="#create">Back to Create Test</a></p></div></div>`;
   const q=currentQ(),r=currentR(),parts=splitQuestion(q);
-  return `<div class="exam-shell" style="--reading-size:${readingSize}px"><header class="exam-header"><div><div class="exam-heading">Section 1: Reading and Writing</div><button class="exam-link" data-action="directions">Directions ${icon('chevron-down')}</button></div><div class="exam-timer ${s.timed&&s.remaining<=300?'warning':''}">${timerMarkup(s)}</div><div class="exam-tools"><button class="exam-tool" data-action="notes" aria-expanded="${notesOpen}">${icon('highlighter')}<span>Highlights &amp; Notes</span></button><button class="exam-tool" data-action="more" aria-expanded="${moreOpen}">${icon('ellipsis-vertical')}<span>More</span></button>${moreOpen?`<div class="more-menu"><button data-action="pause">Pause Test</button><button data-action="navigator">Review Questions</button><div class="size-controls">Text size <button data-action="smaller" aria-label="Decrease text size">−</button><button data-action="larger" aria-label="Increase text size">+</button></div><button data-action="finish">End Test</button></div>`:''}</div></header>
-  <div class="exam-content"><section class="exam-passage" id="question-area" aria-label="Passage">${figures(q)}<div id="source-text">${formattedSource(q,parts.source,r.highlights||[])}</div></section><section class="exam-answer-pane" aria-label="Question and answers"><div class="question-strip"><span class="question-number">${s.index+1}</span><button class="mark-review ${r.flag?'marked':''}" data-action="flag" aria-pressed="${r.flag}">${icon('bookmark')}Mark for Review</button><button class="eliminate-toggle ${eliminator?'active':''}" data-action="eliminator" title="Option eliminator" aria-label="Toggle option eliminator" aria-pressed="${eliminator}">ABC</button></div><p class="exam-prompt">${esc(parts.prompt)}</p><div class="answer-list" role="radiogroup" aria-label="Answer choices">${['A','B','C','D'].map(a=>`<div class="answer-row"><button class="answer-choice ${r.answer===a?'selected':''} ${r.eliminated?.includes(a)?'eliminated':''}" role="radio" aria-checked="${r.answer===a}" data-answer="${a}" ${r.locked?'disabled':''}><span class="choice-letter">${a}</span><span class="choice-text">${esc(q.choices[a]).replace(/\s+/g,' ')}</span></button>${eliminator?`<button class="eliminate-choice" data-eliminate="${a}" aria-label="${r.eliminated?.includes(a)?'Restore':'Eliminate'} option ${a}" ${r.locked?'disabled':''}>${r.eliminated?.includes(a)?'Undo':icon('circle-minus')}</button>`:''}</div>`).join('')}</div>
-  ${s.mode==='tutor'?`<div class="exam-submit"><button class="exam-button secondary" data-action="check" ${!r.answer||r.locked?'disabled':''}>Submit Answer</button></div>${r.locked?`<div class="tutor-feedback"><strong>${isCorrect({id:q.id,...r})?'Correct':'Incorrect'} · Correct answer: ${q.answer}</strong><p class="explanation">${esc(q.rationale)}</p></div>`:''}`:''}</section></div>
+  return `<div class="exam-shell ${q.section==='Math'?'math-exam':''}" style="--reading-size:${readingSize}px"><header class="exam-header"><div><div class="exam-heading">${q.section==='Math'?'Math':'Section 1: Reading and Writing'}</div><button class="exam-link" data-action="directions">Directions ${icon('chevron-down')}</button></div><div class="exam-timer ${s.timed&&s.remaining<=300?'warning':''}">${timerMarkup(s)}</div><div class="exam-tools"><button class="exam-tool" data-action="notes" aria-expanded="${notesOpen}">${icon(q.section==='Math'?'notebook-pen':'highlighter')}<span>${q.section==='Math'?'Notes':'Highlights &amp; Notes'}</span></button><button class="exam-tool" data-action="more" aria-expanded="${moreOpen}">${icon('ellipsis-vertical')}<span>More</span></button>${moreOpen?`<div class="more-menu"><button data-action="pause">Pause Test</button><button data-action="navigator">Review Questions</button><div class="size-controls">Text size <button data-action="smaller" aria-label="Decrease text size">−</button><button data-action="larger" aria-label="Increase text size">+</button></div><button data-action="finish">End Test</button></div>`:''}</div></header>
+  <div class="exam-content"><section class="exam-passage" id="question-area" aria-label="Question content">${figures(q)}<div id="source-text">${formattedSource(q,parts.source,r.highlights||[])}</div></section><section class="exam-answer-pane" aria-label="Question and answers"><div class="question-strip"><span class="question-number">${s.index+1}</span><button class="mark-review ${r.flag?'marked':''}" data-action="flag" aria-pressed="${r.flag}">${icon('bookmark')}Mark for Review</button><button ${q.responseType==='numeric'?'hidden':''} class="eliminate-toggle ${eliminator?'active':''}" data-action="eliminator" title="Option eliminator" aria-label="Toggle option eliminator" aria-pressed="${eliminator}">ABC</button></div><p class="exam-prompt">${esc(parts.prompt)}</p>${q.responseType==='numeric'?`<div class="numeric-response"><label for="numeric-answer">Your answer</label><input id="numeric-answer" type="text" inputmode="text" autocomplete="off" maxlength="30" placeholder="e.g. 3/4 or 0.75" value="${esc(r.answer||'')}" ${r.locked?'disabled':''} aria-describedby="numeric-help"><p id="numeric-help" class="subtle">Enter a number, decimal, or fraction.</p><p id="numeric-error" class="error" role="status"></p></div>`:`<div class="answer-list" role="radiogroup" aria-label="Answer choices">${['A','B','C','D'].map(a=>`<div class="answer-row"><button class="answer-choice ${r.answer===a?'selected':''} ${r.eliminated?.includes(a)?'eliminated':''}" role="radio" aria-checked="${r.answer===a}" data-answer="${a}" ${r.locked?'disabled':''}><span class="choice-letter">${a}</span><span class="choice-text">${esc(q.choices[a]).replace(/\s+/g,' ')}</span></button>${eliminator?`<button class="eliminate-choice" data-eliminate="${a}" aria-label="${r.eliminated?.includes(a)?'Restore':'Eliminate'} option ${a}" ${r.locked?'disabled':''}>${r.eliminated?.includes(a)?'Undo':icon('circle-minus')}</button>`:''}</div>`).join('')}</div>`}
+
+  ${s.mode==='tutor'?`<div class="exam-submit"><button class="exam-button secondary" data-action="check" ${!r.answer||r.locked?'disabled':''}>Submit Answer</button></div>${r.locked?`<div class="tutor-feedback"><strong>${isCorrect({id:q.id,...r})?'Correct':'Incorrect'} · Correct answer: ${q.answer}</strong><div class="explanation">${explanation(q)}</div></div>`:''}`:''}</section></div>
   <footer class="exam-footer"><span class="test-label">${esc(s.name)}</span><button class="question-menu-trigger" data-action="navigator">Question ${s.index+1} of ${s.ids.length} ${icon('chevron-up')}</button><div class="exam-nav"><button class="exam-button" data-jump="${s.index-1}" ${s.index===0?'disabled':''}>Back</button><button class="exam-button" ${s.index===s.ids.length-1?'data-action="review-test"':`data-jump="${s.index+1}"`}>${s.index===s.ids.length-1?'Review':'Next'}</button></div></footer>
-  ${notesOpen?`<aside class="notes-panel" aria-label="Highlights and Notes"><div class="row"><h3>Highlights &amp; Notes</h3><button class="icon-button" data-action="notes" aria-label="Close notes">${icon('x')}</button></div><p>Select passage text, then use Highlight selection.</p><button class="button" data-action="highlight">Highlight selection</button><button class="button" style="margin-top:8px" data-action="clear-highlights">Clear highlights</button><label class="subtle" style="display:block;margin-top:18px" for="question-note">Notes for this question</label><textarea id="question-note" placeholder="Add a note…">${esc(r.notes||'')}</textarea></aside>`:''}</div>`;
+  ${notesOpen?`<aside class="notes-panel" aria-label="Highlights and Notes"><div class="row"><h3>Highlights &amp; Notes</h3><button class="icon-button" data-action="notes" aria-label="Close notes">${icon('x')}</button></div><p>${q.section==='Math'?'Add your working or a reminder for this question.':'Select passage text, then use Highlight selection.'}</p><div ${q.section==='Math'?'hidden':''}><button class="button" data-action="highlight">Highlight selection</button><button class="button" style="margin-top:8px" data-action="clear-highlights">Clear highlights</button></div><label class="subtle" style="display:block;margin-top:18px" for="question-note">Notes for this question</label><textarea id="question-note" placeholder="Add a note…">${esc(r.notes||'')}</textarea></aside>`:''}</div>`;
 }
 
 function showModal(title,body,onConfirm,confirm='Continue',cancel='Cancel') {
@@ -200,13 +211,13 @@ function resultPage(id) {
   const t=tally(s.rows);
   return `<div class="toolbar"><a class="button" href="#history">Back to Previous Tests</a><span class="subtle">${esc(s.name)} · ${date(s.ended)}${s.expired?' · Time limit reached':''}</span></div><div class="metric-row">${metric('Total Questions',t.total)}${metric('Correct Answers',t.correct,`${t.accuracy}% accuracy`)}${metric('Incorrect Answers',t.incorrect)}${metric('Omitted',t.omitted)}</div>
   <section class="section"><h2 class="section-title">Knowledge and Skills</h2><div class="section-body domain-grid">${domainPanels(s.rows)}</div></section><section class="section"><h2 class="section-title">Question Types</h2>${skillTable(s.rows)}</section>
-  <section class="section"><h2 class="section-title">Questions Overview</h2><div class="section-body row"><span class="subtle">Active time ${fmt(s.rows.reduce((a,r)=>a+r.seconds,0))}</span><label class="subtle">Filter <select id="result-filter"><option value="all">All questions</option><option value="incorrect">Incorrect</option><option value="omitted">Omitted</option><option value="correct">Correct</option></select></label></div><div class="table-scroll"><table class="data-table"><thead><tr><th>No.</th><th>Question type</th><th>Your answer</th><th>Correct answer</th><th>Result</th><th>Time</th><th></th></tr></thead><tbody>${s.rows.map((r,i)=>`<tr data-outcome="${!r.answer?'omitted':isCorrect(r)?'correct':'incorrect'}"><td>${i+1}</td><td>${esc(byId[r.id].skill)}</td><td>${r.answer||'—'}</td><td>${byId[r.id].answer}</td><td>${statusFor(r)}</td><td>${fmt(r.seconds)}</td><td><a href="#review/${s.id}/${r.id}">Review</a></td></tr>`).join('')}</tbody></table></div></section><div class="builder-actions"><a class="button primary" href="#create">Create Test</a></div>`;
+  <section class="section"><h2 class="section-title">Questions Overview</h2><div class="section-body row"><span class="subtle">Active time ${fmt(s.rows.reduce((a,r)=>a+r.seconds,0))}</span><label class="subtle">Filter <select id="result-filter"><option value="all">All questions</option><option value="incorrect">Incorrect</option><option value="omitted">Omitted</option><option value="correct">Correct</option></select></label></div><div class="table-scroll"><table class="data-table"><thead><tr><th>No.</th><th>Question type</th><th>Your answer</th><th>Correct answer</th><th>Result</th><th>Time</th><th></th></tr></thead><tbody>${s.rows.map((r,i)=>`<tr data-outcome="${!r.answer?'omitted':isCorrect(r)?'correct':'incorrect'}"><td>${i+1}</td><td>${esc(byId[r.id].skill)}</td><td>${esc(r.answer||'—')}</td><td>${byId[r.id].answer}</td><td>${statusFor(r)}</td><td>${fmt(r.seconds)}</td><td><a href="#review/${s.id}/${r.id}">Review</a></td></tr>`).join('')}</tbody></table></div></section><div class="builder-actions"><a class="button primary" href="#create">Create Test</a></div>`;
 }
 function reviewPage(sid,qid) {
   const s=data.history.find(s=>s.id===sid),r=s?.rows.find(r=>r.id===qid),q=byId[qid];if(!r||!q)return '<div class="empty">Question not found.</div>';
   const parts=splitQuestion(q);
-  return `<div class="toolbar"><a class="button" href="#result/${s.id}">Back to Results</a><span class="subtle">${q.id} · ${q.domain} · ${q.skill}</span></div><section class="section"><h2 class="section-title">${statusFor(r)} ${esc(q.skill)}</h2><div class="review-layout"><div class="review-source">${figures(q)}${formattedSource(q,parts.source,r.highlights||[])}</div><div class="review-answers"><p style="font:18px/1.6 Georgia,serif">${esc(parts.prompt)}</p>${Object.entries(q.choices).map(([a,text])=>`<div class="review-choice ${a===q.answer?'correct':a===r.answer?'wrong':''}"><span class="choice-letter">${a}</span><span>${esc(text).replace(/\s+/g,' ')}</span>${a===q.answer?'<small>Correct answer</small>':a===r.answer?'<small>Your answer</small>':''}</div>`).join('')}</div></div></section>
-  <section class="section"><h2 class="section-title">Explanation</h2><div class="rationale">${esc(q.rationale)}</div></section><section class="section"><h2 class="section-title">Your Activity</h2><div class="section-body"><p class="subtle">${fmt(r.seconds)} · ${r.visits||1} visits · ${r.changes?.length||0} answer changes</p>${r.changes?.length?`<p class="subtle">${r.changes.map(c=>`${c.from||'—'} → ${c.to||'—'} at ${fmt(c.at)}`).join(' · ')}</p>`:''}<label class="subtle" for="error-reason">Error reason</label><select id="error-reason" class="reason-select" data-reason="${s.id}/${q.id}">${reasons.map(v=>`<option ${r.reason===v?'selected':''}>${v}</option>`).join('')}</select>${r.notes?`<h3 style="font-size:15px;margin-top:25px">Your notes</h3><p class="saved-notes">${esc(r.notes)}</p>`:''}${r.points?.length?`<h3 style="font-size:15px;margin-top:25px">Pointer trace</h3><p class="subtle">Movement within the passage area. This does not identify the cause of an error.</p><svg class="pointer-svg" viewBox="0 0 1000 600"><polyline fill="none" stroke="#4b80a7" stroke-width="2" points="${r.points.map(p=>`${p.x*1000},${p.y*600}`).join(' ')}"/></svg>`:''}</div></section>`;
+  return `<div class="toolbar"><a class="button" href="#result/${s.id}">Back to Results</a><span class="subtle">${q.id} · ${q.domain} · ${q.skill}</span></div><section class="section"><h2 class="section-title">${statusFor(r)} ${esc(q.skill)}</h2><div class="review-layout"><div class="review-source">${figures(q)}${formattedSource(q,parts.source,r.highlights||[])}</div><div class="review-answers"><p style="font:18px/1.6 Georgia,serif">${esc(parts.prompt)}</p>${q.responseType==='numeric'?`<p>Your answer: <strong>${esc(r.answer||'Omitted')}</strong></p><p>Correct answer: <strong>${esc(q.answer)}</strong></p>`:''}${Object.entries(q.choices).map(([a,text])=>`<div class="review-choice ${a===q.answer?'correct':a===r.answer?'wrong':''}"><span class="choice-letter">${a}</span><span>${esc(text).replace(/\s+/g,' ')}</span>${a===q.answer?'<small>Correct answer</small>':a===r.answer?'<small>Your answer</small>':''}</div>`).join('')}</div></div></section>
+  <section class="section"><h2 class="section-title">Explanation</h2><div class="rationale">${explanation(q)}</div></section><section class="section"><h2 class="section-title">Your Activity</h2><div class="section-body"><p class="subtle">${fmt(r.seconds)} · ${r.visits||1} visits · ${r.changes?.length||0} answer changes</p>${r.changes?.length?`<p class="subtle">${r.changes.map(c=>`${esc(c.from||'—')} → ${esc(c.to||'—')} at ${fmt(c.at)}`).join(' · ')}</p>`:''}<label class="subtle" for="error-reason">Error reason</label><select id="error-reason" class="reason-select" data-reason="${s.id}/${q.id}">${reasons.map(v=>`<option ${r.reason===v?'selected':''}>${v}</option>`).join('')}</select>${r.notes?`<h3 style="font-size:15px;margin-top:25px">Your notes</h3><p class="saved-notes">${esc(r.notes)}</p>`:''}${r.points?.length?`<h3 style="font-size:15px;margin-top:25px">Pointer trace</h3><p class="subtle">Movement within the passage area. This does not identify the cause of an error.</p><svg class="pointer-svg" viewBox="0 0 1000 600"><polyline fill="none" stroke="#4b80a7" stroke-width="2" points="${r.points.map(p=>`${p.x*1000},${p.y*600}`).join(' ')}"/></svg>`:''}</div></section>`;
 }
 
 function render(preserveScroll=true) {
@@ -230,6 +241,7 @@ function exportHistory() {const url=URL.createObjectURL(new Blob([JSON.stringify
 
 document.addEventListener('input',e=>{
   const t=e.target;
+  if(t.id==='numeric-answer'&&data.active&&!currentR().locked){const r=currentR(),value=t.value.trim(),valid=validResponse(currentQ(),value);if(r.answer!==(valid?value:null)){if(r.answer)r.changes.push({from:r.answer,to:valid?value:null,at:r.seconds});r.answer=valid?value:null;}$('#numeric-error').textContent=value&&!valid?'Enter a valid number or fraction.':'';const submit=$('[data-action="check"]');if(submit)submit.disabled=!r.answer;save();}
   if(t.dataset.count){builder.counts[t.dataset.count]=t.value===''?0:Number(t.value);updateBuilderTotal();}
   if(t.name==='testName')builder.name=t.value;if(t.name==='minutes')builder.minutes=t.value;
   if(t.id==='question-note'&&data.active){currentR().notes=t.value;save();}
@@ -246,7 +258,7 @@ document.addEventListener('change',async e=>{
   if(t.id==='performance-scope'){const sample=location.hash.endsWith('/sample'),history=sample?sampleHistory():data.history,scope=t.value==='recent'?history.slice(0,3):history;$('#performance-report').innerHTML=performanceReport(allRows(scope),scope.length,smartMix(scope,byId));window.lucide?.createIcons();}
   if(t.id==='import-history'){
     try{const f=t.files[0];if(!f)return;if(f.size>20e6)throw Error('File is too large.');const v=JSON.parse(await f.text());if(![1,2].includes(v.version)||!Array.isArray(v.history))throw Error('Invalid history file.');
-      for(const s of v.history){if(typeof s.id!=='string'||! /^[a-zA-Z0-9_-]{1,100}$/.test(s.id)||typeof s.name!=='string'||!Number.isFinite(s.ended)||!Array.isArray(s.rows)||s.rows.some(r=>!byId[r.id]||!Number.isFinite(r.seconds)||r.seconds<0||![null,'A','B','C','D'].includes(r.answer)||!Array.isArray(r.changes)||r.changes.some(c=>![null,'A','B','C','D'].includes(c.from)||![null,'A','B','C','D'].includes(c.to)||!Number.isFinite(c.at))||!Array.isArray(r.points)||r.points.some(p=>!Number.isFinite(p.x)||!Number.isFinite(p.y))))throw Error('The file contains incompatible results.');}
+      for(const s of v.history){if(typeof s.id!=='string'||! /^[a-zA-Z0-9_-]{1,100}$/.test(s.id)||typeof s.name!=='string'||!Number.isFinite(s.ended)||!Array.isArray(s.rows)||s.rows.some(r=>!byId[r.id]||!Number.isFinite(r.seconds)||r.seconds<0||!validResponse(byId[r.id],r.answer)||!Array.isArray(r.changes)||r.changes.some(c=>!validResponse(byId[r.id],c.from)||!validResponse(byId[r.id],c.to)||!Number.isFinite(c.at))||!Array.isArray(r.points)||r.points.some(p=>!Number.isFinite(p.x)||!Number.isFinite(p.y))))throw Error('The file contains incompatible results.');}
       const ids=new Set(data.history.map(s=>s.id));data.history.push(...v.history.filter(s=>!ids.has(s.id)));data.history.sort((a,b)=>b.ended-a.ended);save();render();
     }catch(err){showModal('Import failed',esc(err.message),()=>{},'OK','');}
   }
@@ -254,6 +266,8 @@ document.addEventListener('change',async e=>{
 document.addEventListener('click',e=>{
   if(e.target.closest('.sidebar nav a'))$('.sidebar').classList.remove('open');
   const b=e.target.closest('button');if(!b||b.disabled)return;
+  if(b.dataset.collection){builder.source=b.dataset.collection;render();return;}
+  if(b.dataset.section){builder.section=b.dataset.section;builder.counts=defaultCounts(builder.section);builder.expanded=[];render();return;}
   if(b.dataset.expand){const key=b.dataset.expand;builder.expanded=builder.expanded.includes(key)?builder.expanded.filter(x=>x!==key):[...builder.expanded,key];render();return;}
   if(b.dataset.jump!==undefined){jump(+b.dataset.jump);return;}
   if(b.dataset.answer&&data.active){tick();if(!data.active)return;const r=currentR();if(r.locked)return;const a=b.dataset.answer;if(r.eliminated?.includes(a))return;if(r.answer!==a&&r.answer)r.changes.push({from:r.answer,to:a,at:r.seconds});r.answer=a;save();render();return;}
@@ -263,7 +277,7 @@ document.addEventListener('click',e=>{
     case'sync-now':void syncAccount();break;
     case'reload-cloud-draft':if(accountStore)showModal('Reload saved test?', '<p>This replaces the unfinished test on this device with the latest saved test from your account. Your completed tests will be kept.</p>',async()=>{try{data.active=await accountStore.reloadCloudDraft();if(data.active)data.active.paused=true;save();render();}catch{showModal('Could not reload','Check your connection and try again.',()=>{},'OK','');}},'Reload cloud test');break;
     case'menu':if(window.innerWidth>650)document.body.classList.toggle('nav-collapsed');else $('.sidebar').classList.toggle('open');break;
-    case'reset-counts':builder.counts=defaultCounts();render();break;
+    case'reset-counts':builder.counts=defaultCounts(builder.section);render();break;
     case'flag':currentR().flag=!currentR().flag;save();render();break;
     case'eliminator':eliminator=!eliminator;render();break;
     case'more':moreOpen=!moreOpen;render();break;
@@ -271,7 +285,7 @@ document.addEventListener('click',e=>{
     case'hide-time':data.active.hideTime=!data.active.hideTime;save();render();break;
     case'pause':pause();break;
     case'resume':if(accountStore?.conflict){showModal('Saved test changed','Another device saved a newer test. Use Reload cloud test before continuing.',()=>{},'OK','');break;}if(data.active){data.active.paused=false;data.active.lastTick=Date.now();save();render();}break;
-    case'directions':showModal('Reading and Writing',`<p>Read the passage and choose the best answer from the four choices.</p><p>You may move between questions, mark questions for review, and eliminate answer choices. Only one answer may be selected.</p><p>This practice test contains ${data.active.ids.length} questions. ${data.active.timed?'The timer applies to the entire test.':'This test is untimed.'}</p>`,()=>{},'Close','');break;
+    case'directions':if(currentQ().section==='Math'){showModal('Math directions','<p>Solve each problem. For multiple-choice questions, choose A, B, C, or D using the choices in the original question. For numeric questions, enter a number, decimal, or fraction.</p><p>You may move between questions, mark for review, and use Notes. Answers are revealed after submission.</p>',()=>{},'Close','');break;}showModal('Reading and Writing',`<p>Read the passage and choose the best answer from the four choices.</p><p>You may move between questions, mark questions for review, and eliminate answer choices. Only one answer may be selected.</p><p>This practice test contains ${data.active.ids.length} questions. ${data.active.timed?'The timer applies to the entire test.':'This test is untimed.'}</p>`,()=>{},'Close','');break;
     case'navigator':moreOpen=false;navigator();break;
     case'review-test':navigator(true);break;
     case'finish':moreOpen=false;confirmFinish();break;
@@ -333,8 +347,8 @@ authController=await mountAuth({
     data=loaded;
     if(store.conflict&&data.active)data.active.paused=true;
     // Never claim a shared browser's old anonymous history for a new account.
-    builder={counts:defaultCounts(),pool:'all',tutor:false,timed:true,minutes:35,name:'',telemetry:false,
-      skills:Object.fromEntries(BUCKETS.map(b=>[b.id,[...new Set(bank.filter(q=>belongs(q,b)).map(q=>q.skill))]])),expanded:[]};
+    builder={source:'college-board',section:'Reading and Writing',counts:defaultCounts(),pool:'all',tutor:false,timed:true,minutes:35,name:'',telemetry:false,
+      skills:Object.fromEntries(allBuckets.map(b=>[b.id,[...new Set(bank.filter(q=>belongs(q,b)).map(q=>q.skill))]])),expanded:[]};
     $('#account-controls').innerHTML=`<span class="account-email">${esc(user.email||'Your account')}</span><button class="account-signout" data-action="signout">Sign out</button>`;
     $('#account-label').textContent='Personal practice';$('#sync-toolbar').hidden=false;
     appReady=true;render(false);if(screen==='practice')tick();

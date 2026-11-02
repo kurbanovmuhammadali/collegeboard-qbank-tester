@@ -6,8 +6,33 @@ export const BUCKETS = [
   { id: 'conventions', label: 'Standard English Conventions', domain: 'Standard English Conventions', defaultCount: 5 },
   { id: 'synthesis', label: 'Rhetorical Synthesis', domain: 'Expression of Ideas', skill: 'Rhetorical Synthesis', defaultCount: 2 },
 ];
+export const MATH_BUCKETS = [
+  {id:'algebra',label:'Algebra',domain:'Algebra',defaultCount:10},
+  {id:'advanced',label:'Advanced Math',domain:'Advanced Math',defaultCount:10},
+  {id:'data',label:'Problem-Solving and Data Analysis',domain:'Problem-Solving and Data Analysis',defaultCount:5},
+  {id:'geometry',label:'Geometry and Trigonometry',domain:'Geometry and Trigonometry',defaultCount:5},
+];
+export const bucketsFor = section => section === 'Math' ? MATH_BUCKETS : BUCKETS;
+export function inCollection(q, config={}) {
+  return (q.source || 'college-board') === (config.source || 'college-board') && q.section === (config.section || 'Reading and Writing');
+}
+function numericValue(value) {
+  const text=String(value??'').trim().replace(/−/g,'-');
+  if(!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:\/[+-]?(?:\d+(?:\.\d*)?|\.\d+))?$/.test(text))return null;
+  const [a,b]=text.split('/').map(Number), n=b===undefined?a:a/b;
+  return Number.isFinite(n)?n:null;
+}
+export function validResponse(q, answer) {
+  return answer===null || (q?.responseType==='numeric' ? typeof answer==='string' && answer.length<=30 && numericValue(answer)!==null : ['A','B','C','D'].includes(answer));
+}
+export function answerMatches(q, answer) {
+  if(answer===null || answer===undefined || answer==='')return false;
+  if(q?.responseType!=='numeric')return answer===q?.answer;
+  const value=numericValue(answer);if(value===null)return false;
+  return (q.acceptedAnswers||q.answer.split(',')).some(a=>{const expected=numericValue(a);return expected!==null && Math.abs(value-expected)<=1e-9*Math.max(1,Math.abs(expected));});
+}
 export function belongs(q, bucket) { return q.domain === bucket.domain && (!bucket.skill || q.skill === bucket.skill); }
-export function defaultCounts() { return Object.fromEntries(BUCKETS.map(b => [b.id, b.defaultCount])); }
+export function defaultCounts(section) { return Object.fromEntries(bucketsFor(section).map(b => [b.id, b.defaultCount])); }
 export function flattenHistory(history, byId) {
   return history.flatMap(s => s.rows.map(r => ({ ...r, session: s.id, ended: s.ended, mode: s.mode }))).filter(r => byId[r.id]);
 }
@@ -18,7 +43,7 @@ export function skillStats(rows, byId) {
     const key = q.domain + '/' + q.skill;
     if (!groups.has(key)) groups.set(key, { domain: q.domain, skill: q.skill, total: 0, correct: 0, incorrect: 0, omitted: 0, seconds: 0, sessions: new Set() });
     const g = groups.get(key); g.total++; g.seconds += row.seconds || 0; g.sessions.add(row.session);
-    if (!row.answer) g.omitted++; else if (row.answer === q.answer) g.correct++; else g.incorrect++;
+    if (!row.answer) g.omitted++; else if (answerMatches(q, row.answer)) g.correct++; else g.incorrect++;
   }
   return [...groups.values()].map(g => ({ ...g, sessions: g.sessions.size, answered: g.correct + g.incorrect,
     accuracy: g.total ? g.correct / g.total : 0, errorRate: g.total ? g.incorrect / g.total : 0,
@@ -28,7 +53,7 @@ export function skillStats(rows, byId) {
 export function smartMix(history, byId) {
   const recent = [...history].sort((a, b) => b.ended - a.ended).filter(s => s.mode !== 'tutor').flatMap(s => s.rows).filter(r => byId[r.id]).slice(0, 90);
   if (recent.length < 10) return { weights: [.25, .5, .25], evidence: recent.length, accuracy: null };
-  const correct = recent.filter(r => r.answer === byId[r.id].answer).length;
+  const correct = recent.filter(r => answerMatches(byId[r.id], r.answer)).length;
   // Ten prior observations centered at 70% temper a single unusually good/bad session.
   const accuracy = (correct + 7) / (recent.length + 10);
   const hard = Math.max(.2, Math.min(.4, .25 + (accuracy - .65) * .5));
@@ -46,11 +71,13 @@ export function eligiblePool(bank, history, byId, pool = 'all') {
   const rows = flattenHistory(history, byId), used = new Set(rows.map(r => r.id));
   const latest = new Map();
   for (const row of [...rows].sort((a,b) => a.ended - b.ended)) latest.set(row.id, row);
-  return bank.filter(q => pool === 'unused' ? !used.has(q.id) : pool === 'incorrect' ? latest.has(q.id) && latest.get(q.id).answer !== q.answer : pool === 'marked' ? rows.some(r => r.id === q.id && r.flag) : true);
+  return bank.filter(q => pool === 'unused' ? !used.has(q.id) : pool === 'incorrect' ? latest.has(q.id) && !answerMatches(q, latest.get(q.id).answer) : pool === 'marked' ? rows.some(r => r.id === q.id && r.flag) : true);
 }
 export function selectTest(bank, history, config, { rng = Math.random, now = Date.now() } = {}) {
+  bank=bank.filter(q=>inCollection(q,config));
+  const buckets=bucketsFor(config.section);
   const byId = Object.fromEntries(bank.map(q => [q.id, q]));
-  const counts = BUCKETS.map(b => Number(config.counts[b.id] ?? 0));
+  const counts = buckets.map(b => Number(config.counts[b.id] ?? 0));
   if (counts.some(n => !Number.isInteger(n) || n < 0 || n > 30)) throw Error('Enter a whole number from 0 to 30 for each topic.');
   const total = counts.reduce((a,b)=>a+b,0);
   if (total < 1 || total > 30) throw Error('Select between 1 and 30 questions in total.');
@@ -58,8 +85,8 @@ export function selectTest(bank, history, config, { rng = Math.random, now = Dat
   const rows = flattenHistory(history, byId), stats = skillStats(rows, byId), statBySkill = Object.fromEntries(stats.map(s => [s.domain + '/' + s.skill, s]));
   const latest = new Map(); for (const row of [...rows].sort((a,b) => a.ended - b.ended)) latest.set(row.id, row);
   const selected = [], fallbacks = [], rankedBuckets = [];
-  for (let bi = 0; bi < BUCKETS.length; bi++) {
-    const bucket = BUCKETS[bi], wanted = counts[bi], allowedSkills = config.skills?.[bucket.id];
+  for (let bi = 0; bi < buckets.length; bi++) {
+    const bucket = buckets[bi], wanted = counts[bi], allowedSkills = config.skills?.[bucket.id];
     const candidates = pool.filter(q => belongs(q, bucket) && (!allowedSkills || allowedSkills.includes(q.skill)));
     if (candidates.length < wanted) throw Error(`${bucket.label}: ${candidates.length} available; ${wanted} requested. Reduce the count or change Question Mode / selected skills.`);
     const target = allocate(wanted, mix.weights), taken = new Set();
@@ -68,7 +95,7 @@ export function selectTest(bank, history, config, { rng = Math.random, now = Dat
       const weak = skill && skill.total >= 3 ? Math.max(0, .75 - (skill.correct + 2) / (skill.total + 4)) * 3 : 0;
       let weight = 1 + weak;
       if (!last) weight *= 2.5;
-      else if (last.answer !== q.answer && now - last.ended >= 2 * 86400000) weight *= 2;
+      else if (!answerMatches(q, last.answer) && now - last.ended >= 2 * 86400000) weight *= 2;
       else if (now - last.ended < 86400000) weight *= .35;
       return { q, score: -Math.log(Math.max(1e-9, rng())) / weight };
     }).sort((a,b)=>a.score-b.score);
