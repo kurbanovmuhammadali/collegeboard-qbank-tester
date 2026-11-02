@@ -22,14 +22,27 @@ function numericValue(value) {
   const [a,b]=text.split('/').map(Number), n=b===undefined?a:a/b;
   return Number.isFinite(n)?n:null;
 }
+function numericRatio(value) {
+  const text=String(value??'').trim().replace(/−/g,'-');
+  if(numericValue(text)===null)return null;
+  function decimal(part) {
+    const negative=part.startsWith('-'),unsigned=part.replace(/^[+-]/,''),places=unsigned.includes('.')?unsigned.split('.')[1].length:0;
+    return {n:BigInt(unsigned.replace('.',''))*(negative?-1n:1n),d:10n**BigInt(places)};
+  }
+  const parts=text.split('/'),a=decimal(parts[0]);
+  if(parts.length===1)return a;
+  const b=decimal(parts[1]);return b.n===0n?null:{n:a.n*b.d,d:a.d*b.n};
+}
 export function validResponse(q, answer) {
   return answer===null || (q?.responseType==='numeric' ? typeof answer==='string' && answer.length<=30 && numericValue(answer)!==null : ['A','B','C','D'].includes(answer));
 }
 export function answerMatches(q, answer) {
-  if(answer===null || answer===undefined || answer==='')return false;
+  if(!q || q.answerStatus==='unresolved' || answer===null || answer===undefined || answer==='')return false;
   if(q?.responseType!=='numeric')return answer===q?.answer;
   const value=numericValue(answer);if(value===null)return false;
-  return (q.acceptedAnswers||q.answer.split(',')).some(a=>{const expected=numericValue(a);return expected!==null && Math.abs(value-expected)<=1e-9*Math.max(1,Math.abs(expected));});
+  if(q.acceptedRange && Number.isFinite(q.acceptedRange.min) && Number.isFinite(q.acceptedRange.max) && value>=q.acceptedRange.min && value<=q.acceptedRange.max)return true;
+  const actual=numericRatio(answer);if(!actual)return false;
+  return (q.acceptedAnswers||q.answer.split(',')).some(a=>{const expected=numericRatio(a);return expected!==null && actual.n*expected.d===expected.n*actual.d;});
 }
 export function belongs(q, bucket) { return q.domain === bucket.domain && (!bucket.skill || q.skill === bucket.skill); }
 export function defaultCounts(section) { return Object.fromEntries(bucketsFor(section).map(b => [b.id, b.defaultCount])); }
@@ -51,7 +64,7 @@ export function skillStats(rows, byId) {
 }
 // Tutor attempts remain in analytics, but only test-mode sessions change the challenge mix.
 export function smartMix(history, byId) {
-  const recent = [...history].sort((a, b) => b.ended - a.ended).filter(s => s.mode !== 'tutor').flatMap(s => s.rows).filter(r => byId[r.id]).slice(0, 90);
+  const recent = [...history].sort((a, b) => b.ended - a.ended).filter(s => s.mode !== 'tutor').flatMap(s => s.rows).filter(r => byId[r.id] && !byId[r.id].answerStatus).slice(0, 90);
   if (recent.length < 10) return { weights: [.25, .5, .25], evidence: recent.length, accuracy: null };
   const correct = recent.filter(r => answerMatches(byId[r.id], r.answer)).length;
   // Ten prior observations centered at 70% temper a single unusually good/bad session.
@@ -74,7 +87,7 @@ export function eligiblePool(bank, history, byId, pool = 'all') {
   return bank.filter(q => pool === 'unused' ? !used.has(q.id) : pool === 'incorrect' ? latest.has(q.id) && !answerMatches(q, latest.get(q.id).answer) : pool === 'marked' ? rows.some(r => r.id === q.id && r.flag) : true);
 }
 export function selectTest(bank, history, config, { rng = Math.random, now = Date.now() } = {}) {
-  bank=bank.filter(q=>inCollection(q,config));
+  bank=bank.filter(q=>inCollection(q,config) && q.answerStatus!=='unresolved' && !q.duplicateOf);
   const buckets=bucketsFor(config.section);
   const byId = Object.fromEntries(bank.map(q => [q.id, q]));
   const counts = buckets.map(b => Number(config.counts[b.id] ?? 0));
@@ -92,13 +105,14 @@ export function selectTest(bank, history, config, { rng = Math.random, now = Dat
     const target = allocate(wanted, mix.weights), taken = new Set();
     const ranked = candidates.map(q => {
       const skill = statBySkill[q.domain + '/' + q.skill], last = latest.get(q.id);
-      const weak = skill && skill.total >= 3 ? Math.max(0, .75 - (skill.correct + 2) / (skill.total + 4)) * 3 : 0;
+      const weak = config.source!=='uworld' && skill && skill.total >= 3 ? Math.max(0, .75 - (skill.correct + 2) / (skill.total + 4)) * 3 : 0;
       let weight = 1 + weak;
       if (!last) weight *= 2.5;
       else if (!answerMatches(q, last.answer) && now - last.ended >= 2 * 86400000) weight *= 2;
       else if (now - last.ended < 86400000) weight *= .35;
       return { q, score: -Math.log(Math.max(1e-9, rng())) / weight };
     }).sort((a,b)=>a.score-b.score);
+    if(config.source==='uworld'){selected.push(...ranked.slice(0,wanted).map(x=>x.q.id));continue;}
     rankedBuckets.push({ bucket, ranked });
     for (let i = 0; i < LEVELS.length; i++) {
       const matches = ranked.filter(x => x.q.difficulty === LEVELS[i]).slice(0, target[i]);
@@ -129,5 +143,5 @@ export function selectTest(bank, history, config, { rng = Math.random, now = Dat
   }
   // Shuffle order without changing the exact topic counts or difficulty composition.
   for (let i = selected.length - 1; i > 0; i--) { const j = Math.floor(rng() * (i + 1)); [selected[i], selected[j]] = [selected[j], selected[i]]; }
-  return { ids: selected, mix, fallbacks, composition: Object.fromEntries(LEVELS.map(l => [l, selected.filter(id => byId[id].difficulty === l).length])) };
+  return { ids: selected, mix, fallbacks, composition: config.source==='uworld'?{Unrated:selected.length}:Object.fromEntries(LEVELS.map(l => [l, selected.filter(id => byId[id].difficulty === l).length])) };
 }
