@@ -45,6 +45,13 @@ export function answerMatches(q, answer) {
   return (q.acceptedAnswers||q.answer.split(',')).some(a=>{const expected=numericRatio(a);return expected!==null && actual.n*expected.d===expected.n*actual.d;});
 }
 export function belongs(q, bucket) { return q.domain === bucket.domain && (!bucket.skill || q.skill === bucket.skill); }
+export function selectedDifficulties(config, bucketId) {
+  const selected = config.difficulties?.[bucketId];
+  return selected === undefined ? LEVELS : LEVELS.filter(level => Array.isArray(selected) && selected.includes(level));
+}
+export function matchesDifficulty(q, config, bucketId) {
+  return config.source === 'uworld' || selectedDifficulties(config, bucketId).includes(q.difficulty);
+}
 export function defaultCounts(section) { return Object.fromEntries(bucketsFor(section).map(b => [b.id, b.defaultCount])); }
 export function flattenHistory(history, byId) {
   return history.flatMap(s => s.rows.map(r => ({ ...r, session: s.id, ended: s.ended, mode: s.mode }))).filter(r => byId[r.id]);
@@ -73,11 +80,11 @@ export function smartMix(history, byId) {
   const easy = Math.max(.2, Math.min(.35, .25 - (accuracy - .65) * .3));
   return { weights: [easy, 1 - easy - hard, hard], evidence: recent.length, accuracy };
 }
-export function allocate(n, weights) {
+export function allocate(n, weights, ensureExtremes = true) {
   const raw = weights.map(w => n * w), counts = raw.map(Math.floor);
   const order = raw.map((v, i) => ({ i, rest: v - counts[i] })).sort((a, b) => b.rest - a.rest || a.i - b.i);
   for (let remaining = n - counts.reduce((a,b)=>a+b,0), j = 0; remaining > 0; remaining--, j++) counts[order[j % order.length].i]++;
-  if (n >= 3) for (const i of [0, 2]) if (!counts[i]) { const from = counts.indexOf(Math.max(...counts)); counts[from]--; counts[i]++; }
+  if (ensureExtremes && n >= 3) for (const i of [0, 2]) if (!counts[i]) { const from = counts.indexOf(Math.max(...counts)); counts[from]--; counts[i]++; }
   return counts;
 }
 export function eligiblePool(bank, history, byId, pool = 'all') {
@@ -97,12 +104,16 @@ export function selectTest(bank, history, config, { rng = Math.random, now = Dat
   const pool = eligiblePool(bank, history, byId, config.pool), mix = smartMix(history, byId);
   const rows = flattenHistory(history, byId), stats = skillStats(rows, byId), statBySkill = Object.fromEntries(stats.map(s => [s.domain + '/' + s.skill, s]));
   const latest = new Map(); for (const row of [...rows].sort((a,b) => a.ended - b.ended)) latest.set(row.id, row);
-  const selected = [], fallbacks = [], rankedBuckets = [];
+  const selected = [], automaticIds = [], fallbacks = [], rankedBuckets = [];
   for (let bi = 0; bi < buckets.length; bi++) {
     const bucket = buckets[bi], wanted = counts[bi], allowedSkills = config.skills?.[bucket.id];
-    const candidates = pool.filter(q => belongs(q, bucket) && (!allowedSkills || allowedSkills.includes(q.skill)));
-    if (candidates.length < wanted) throw Error(`${bucket.label}: ${candidates.length} available; ${wanted} requested. Reduce the count or change Question Mode / selected skills.`);
-    const target = allocate(wanted, mix.weights), taken = new Set();
+    const levels = selectedDifficulties(config, bucket.id);
+    const customDifficulty = config.source !== 'uworld' && levels.length !== LEVELS.length;
+    const candidates = pool.filter(q => belongs(q, bucket) && (!allowedSkills || allowedSkills.includes(q.skill)) && matchesDifficulty(q, config, bucket.id));
+    if (candidates.length < wanted) throw Error(`${bucket.label}: ${candidates.length} available; ${wanted} requested. Reduce the count or change Question Mode, selected skills, or difficulty filters.`);
+    const weights = mix.weights.map((weight, i) => levels.includes(LEVELS[i]) ? weight : 0);
+    const weightTotal = weights.reduce((a,b)=>a+b,0);
+    const target = allocate(wanted, customDifficulty && weightTotal ? weights.map(w=>w/weightTotal) : mix.weights, !customDifficulty), taken = new Set();
     const ranked = candidates.map(q => {
       const skill = statBySkill[q.domain + '/' + q.skill], last = latest.get(q.id);
       const weak = config.source!=='uworld' && skill && skill.total >= 3 ? Math.max(0, .75 - (skill.correct + 2) / (skill.total + 4)) * 3 : 0;
@@ -113,7 +124,8 @@ export function selectTest(bank, history, config, { rng = Math.random, now = Dat
       return { q, score: -Math.log(Math.max(1e-9, rng())) / weight };
     }).sort((a,b)=>a.score-b.score);
     if(config.source==='uworld'){selected.push(...ranked.slice(0,wanted).map(x=>x.q.id));continue;}
-    rankedBuckets.push({ bucket, ranked });
+    if (!customDifficulty) rankedBuckets.push({ bucket, ranked });
+    const selectionStart = selected.length;
     for (let i = 0; i < LEVELS.length; i++) {
       const matches = ranked.filter(x => x.q.difficulty === LEVELS[i]).slice(0, target[i]);
       matches.forEach(x => { selected.push(x.q.id); taken.add(x.q.id); });
@@ -121,11 +133,12 @@ export function selectTest(bank, history, config, { rng = Math.random, now = Dat
     }
     const missing = wanted - taken.size;
     ranked.filter(x => !taken.has(x.q.id)).slice(0, missing).forEach(x => selected.push(x.q.id));
+    if (!customDifficulty) automaticIds.push(...selected.slice(selectionStart));
   }
   // Reconcile rounding across small topics. Otherwise several one/two-question
   // topics can independently round Hard to zero despite a sizeable total test.
-  const desired = allocate(total, mix.weights);
-  const actual = LEVELS.map(l => selected.filter(id => byId[id].difficulty === l).length);
+  const desired = allocate(automaticIds.length, mix.weights);
+  const actual = LEVELS.map(l => automaticIds.filter(id => byId[id].difficulty === l).length);
   for (let level = 0; level < LEVELS.length; level++) {
     while (actual[level] < desired[level]) {
       let swapped = false;

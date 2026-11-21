@@ -1,4 +1,4 @@
-import { BUCKETS, MATH_BUCKETS, bucketsFor, inCollection, answerMatches, validResponse, LEVELS, belongs, defaultCounts, flattenHistory, skillStats, smartMix, eligiblePool, selectTest } from './engine.mjs';
+import { BUCKETS, MATH_BUCKETS, bucketsFor, inCollection, answerMatches, validResponse, LEVELS, selectedDifficulties, matchesDifficulty, belongs, defaultCounts, flattenHistory, skillStats, smartMix, eligiblePool, selectTest } from './engine.mjs';
 import { mountAuth } from './auth.mjs';
 import { AccountStore } from './account-store.mjs';
 import { collectLogs, groupLogs, logText, logType, writeLog, applyAssignments } from './error-logs.mjs';
@@ -39,7 +39,7 @@ render(false);
 }
 let screen = 'create', moreOpen=false, notesOpen=false, eliminator=false, readingSize=18, storageWarning=false, pendingHighlight=null;
 let builder = { source:'college-board', section:'Reading and Writing', counts:defaultCounts(), pool:'all', tutor:false, timed:true, minutes:35, name:'', telemetry:false,
-  skills:Object.fromEntries(allBuckets.map(b=>[b.id,[...new Set(bank.filter(q=>belongs(q,b)).map(q=>q.skill))]])), expanded:[] };
+  difficulties:{}, difficultyExpanded:[], skills:Object.fromEntries(allBuckets.map(b=>[b.id,[...new Set(bank.filter(q=>belongs(q,b)).map(q=>q.skill))]])), expanded:[] };
 const skillDescriptions = {
   'Central Ideas and Details':'Main idea and key details', 'Inferences':'Conclusions supported by the passage',
   'Command of Evidence':'Textual and quantitative evidence', 'Words in Context':'Vocabulary in context',
@@ -156,12 +156,14 @@ function builderPage() {
     <h2 class="section-title">Question Mode ${icon('info')}</h2><div class="section-body question-modes">${[['all','All'],['unused','Unused'],['incorrect','Incorrect'],['marked','Marked']].map(([v,label])=>`<label><input type="radio" name="pool" value="${v}" ${builder.pool===v?'checked':''}>${label}<span class="count-pill">${eligiblePool(collectionBank(),data.history,byId,v).length}</span></label>`).join('')}</div></section>
     <section class="section"><h2 class="section-title">Subjects &amp; Question Counts</h2><div class="topic-head"><span>${builder.section}</span><span>Available</span><span>Questions</span></div>
     ${builderBuckets.map(b=>{
-      const available=pool.filter(q=>belongs(q,b)&&builder.skills[b.id].includes(q.skill)).length;
+      const available=pool.filter(q=>belongs(q,b)&&builder.skills[b.id].includes(q.skill)&&matchesDifficulty(q,builder,b.id)).length;
+      const levels=selectedDifficulties(builder,b.id), difficultyOpen=builder.difficultyExpanded.includes(b.id);
       const skills=[...new Set(collectionBank().filter(q=>belongs(q,b)).map(q=>q.skill))],expanded=builder.expanded.includes(b.id);
-      return `${b.id==='transitions'?'<div class="topic-group" role="group" aria-label="Expression of Ideas"><h3 class="topic-group-title">Expression of Ideas</h3>':''}<div class="topic-row ${b.domain==='Expression of Ideas'?'topic-child':''}"><div class="topic-line"><div class="topic-label"><button class="expand-topic" type="button" data-expand="${b.id}" aria-label="${expanded?'Collapse':'Expand'} ${b.label} skills" aria-expanded="${expanded}">${icon(expanded?'chevron-down':'chevron-right')}</button><label for="count-${b.id}">${b.label}</label></div><span><span class="count-pill">${available}</span></span><input id="count-${b.id}" class="topic-number number-input" type="number" min="0" max="30" step="1" value="${builder.counts[b.id]}" name="count-${b.id}" data-count="${b.id}" aria-label="${b.label} question count"></div>
-      <div class="topic-skills" ${expanded?'':'hidden'}>${skills.map(skill=>{const g=stats.find(s=>s.skill===skill);return `<label><input type="checkbox" data-skill-bucket="${b.id}" value="${esc(skill)}" ${builder.skills[b.id].includes(skill)?'checked':''}>${esc(skill)} <span class="count-pill">${pool.filter(q=>belongs(q,b)&&q.skill===skill).length}</span>${g?.status==='Needs practice'?'<span class="status weak">Focus</span>':''}</label>`}).join('')}</div></div>${b.id==='synthesis'?'</div>':''}`;
+      return `${b.id==='transitions'?'<div class="topic-group" role="group" aria-label="Expression of Ideas"><h3 class="topic-group-title">Expression of Ideas</h3>':''}<div class="topic-row ${b.domain==='Expression of Ideas'?'topic-child':''}"><div class="topic-line"><div class="topic-label"><button class="expand-topic" type="button" data-expand="${b.id}" aria-label="${expanded?'Collapse':'Expand'} ${b.label} skills" aria-expanded="${expanded}">${icon(expanded?'chevron-down':'chevron-right')}</button><div class="topic-title"><label for="count-${b.id}">${b.label}</label>${builder.source!=='uworld'?`<button type="button" class="difficulty-toggle" data-difficulty-expand="${b.id}" aria-expanded="${difficultyOpen}" aria-controls="difficulty-${b.id}" aria-label="Filter ${b.label} by difficulty">${icon('sliders-horizontal')} ${levels.length===LEVELS.length?'All difficulties':levels.length?levels.join(' + '):'No difficulties'}</button>`: ''}</div></div><span><span class="count-pill">${available}</span></span><input id="count-${b.id}" class="topic-number number-input" type="number" min="0" max="30" step="1" value="${builder.counts[b.id]}" name="count-${b.id}" data-count="${b.id}" aria-label="${b.label} question count"></div>
+      ${builder.source!=='uworld'?`<fieldset id="difficulty-${b.id}" class="difficulty-options" ${difficultyOpen?'':'hidden'}><legend>${b.label} difficulty</legend>${LEVELS.map(level=>`<label><input type="checkbox" data-difficulty-bucket="${b.id}" value="${level}" ${levels.includes(level)?'checked':''}>${level}</label>`).join('')}<p class="subtle">Select one or more levels. Only selected difficulties will be included.</p></fieldset>`:''}
+      <div class="topic-skills" ${expanded?'':'hidden'}>${skills.map(skill=>{const g=stats.find(s=>s.skill===skill);return `<label><input type="checkbox" data-skill-bucket="${b.id}" value="${esc(skill)}" ${builder.skills[b.id].includes(skill)?'checked':''}>${esc(skill)} <span class="count-pill">${pool.filter(q=>belongs(q,b)&&q.skill===skill&&matchesDifficulty(q,builder,b.id)).length}</span>${g?.status==='Needs practice'?'<span class="status weak">Focus</span>':''}</label>`}).join('')}</div></div>${b.id==='synthesis'?'</div>':''}`;
     }).join('')}</section>
-    <section class="section"><h2 class="section-title">No. of Questions</h2><div class="section-body"><div class="test-settings"><label class="test-name">Test name <input type="text" name="testName" maxlength="80" placeholder="Practice ${data.history.length+1}" value="${esc(builder.name)}"></label><div id="total-block" class="total-block ${selectedTotal>30||selectedTotal<1?'invalid':''}"><strong id="question-total">${selectedTotal}</strong><span>/ 30 maximum</span></div></div><p class="subtle" style="margin:18px 0 0">${builder.source==='uworld'?'UWorld difficulty is not rated. Your chosen topic counts are kept exact.':'Question difficulty is selected automatically. Every test includes a balanced mix.'}</p>
+    <section class="section"><h2 class="section-title">No. of Questions</h2><div class="section-body"><div class="test-settings"><label class="test-name">Test name <input type="text" name="testName" maxlength="80" placeholder="Practice ${data.history.length+1}" value="${esc(builder.name)}"></label><div id="total-block" class="total-block ${selectedTotal>30||selectedTotal<1?'invalid':''}"><strong id="question-total">${selectedTotal}</strong><span>/ 30 maximum</span></div></div><p class="subtle" style="margin:18px 0 0">${builder.source==='uworld'?'UWorld difficulty is not rated. Your chosen topic counts are kept exact.':'Use each topic’s difficulty filter to select Easy, Medium, Hard, or a combination. All difficulties keeps the automatic mix.'}</p>
     <details style="margin-top:16px"><summary class="subtle" style="cursor:pointer">Activity tracking</summary><label class="switch-label" style="margin-top:15px"><input type="checkbox" name="telemetry" ${builder.telemetry?'checked':''}><span class="switch"></span>Record pointer movement</label><p class="subtle" style="margin-top:12px">Optional, stored on this device. Pointer movement does not identify why an answer was wrong.</p></details>
     <p id="builder-error" class="error" role="alert"></p></div></section>
     <div class="builder-actions"><button type="button" class="button" data-action="reset-counts">Reset default mix</button><button type="submit" class="button primary generate" id="generate-test" ${selectedTotal>30||selectedTotal<1?'disabled':''}>Generate Test</button></div>
@@ -328,6 +330,7 @@ document.addEventListener('change',async e=>{
   if(t.name==='tutor'){builder.tutor=t.checked;$('#mode-description').textContent=t.checked?'Answers and explanations are available after you submit each response.':'Answers and explanations are available after you finish the test.';}
   if(t.name==='timed'){builder.timed=t.checked;$('#minutes-field').hidden=!t.checked;}
   if(t.name==='telemetry')builder.telemetry=t.checked;
+  if(t.dataset.difficultyBucket){const key=t.dataset.difficultyBucket,levels=selectedDifficulties(builder,key);builder.difficulties[key]=t.checked?[...new Set([...levels,t.value])]:levels.filter(level=>level!==t.value);render();}
   if(t.dataset.skillBucket){let arr=builder.skills[t.dataset.skillBucket];builder.skills[t.dataset.skillBucket]=t.checked?[...new Set([...arr,t.value])]:arr.filter(v=>v!==t.value);render();}
   if(t.id==='result-filter')document.querySelectorAll('[data-outcome]').forEach(row=>row.hidden=t.value!=='all'&&row.dataset.outcome!==t.value);
   if(t.dataset.reason){const [sid,qid]=t.dataset.reason.split('/');const row=data.history.find(s=>s.id===sid).rows.find(r=>r.id===qid);row.reason=t.value;if(logText(row)&&t.value!=='Not specified'){row.errorType=t.value;row.errorTypeManual=true;}save();}
@@ -344,6 +347,7 @@ document.addEventListener('click',e=>{
   const b=e.target.closest('button');if(!b||b.disabled)return;
   if(b.dataset.collection){builder.source=b.dataset.collection;builder.counts=defaultCounts(builder.section);builder.pool='all';builder.expanded=[];render();return;}
   if(b.dataset.section){builder.section=b.dataset.section;builder.counts=defaultCounts(builder.section);builder.expanded=[];render();return;}
+  if(b.dataset.difficultyExpand){const key=b.dataset.difficultyExpand;builder.difficultyExpanded=builder.difficultyExpanded.includes(key)?builder.difficultyExpanded.filter(id=>id!==key):[...builder.difficultyExpanded,key];render();return;}
   if(b.dataset.expand){const key=b.dataset.expand;builder.expanded=builder.expanded.includes(key)?builder.expanded.filter(x=>x!==key):[...builder.expanded,key];render();return;}
   if(b.dataset.jump!==undefined){jump(+b.dataset.jump);return;}
   if(b.dataset.answer&&data.active){tick();if(!data.active)return;const r=currentR();if(r.locked)return;const a=b.dataset.answer;if(r.eliminated?.includes(a))return;if(r.answer!==a&&r.answer)r.changes.push({from:r.answer,to:a,at:r.seconds});r.answer=a;save();render();return;}
@@ -354,7 +358,7 @@ document.addEventListener('click',e=>{
     case'sync-now':void syncAccount();break;
     case'reload-cloud-draft':if(accountStore)showModal('Reload saved test?', '<p>This replaces the unfinished test on this device with the latest saved test from your account. Your completed tests will be kept.</p>',async()=>{try{data.active=await accountStore.reloadCloudDraft();if(data.active)data.active.paused=true;save();render();}catch{showModal('Could not reload','Check your connection and try again.',()=>{},'OK','');}},'Reload cloud test');break;
     case'menu':if(window.innerWidth>650)document.body.classList.toggle('nav-collapsed');else $('.sidebar').classList.toggle('open');break;
-    case'reset-counts':builder.counts=defaultCounts(builder.section);render();break;
+    case'reset-counts':builder.counts=defaultCounts(builder.section);builder.difficulties={};builder.difficultyExpanded=[];render();break;
     case'flag':currentR().flag=!currentR().flag;save();render();break;
     case'eliminator':eliminator=!eliminator;render();break;
     case'more':moreOpen=!moreOpen;render();break;
@@ -426,7 +430,7 @@ authController=await mountAuth({
     if(store.conflict&&data.active)data.active.paused=true;
     // Never claim a shared browser's old anonymous history for a new account.
     builder={source:'college-board',section:'Reading and Writing',counts:defaultCounts(),pool:'all',tutor:false,timed:true,minutes:35,name:'',telemetry:false,
-      skills:Object.fromEntries(allBuckets.map(b=>[b.id,[...new Set(bank.filter(q=>belongs(q,b)).map(q=>q.skill))]])),expanded:[]};
+      difficulties:{}, difficultyExpanded:[], skills:Object.fromEntries(allBuckets.map(b=>[b.id,[...new Set(bank.filter(q=>belongs(q,b)).map(q=>q.skill))]])),expanded:[]};
     $('#account-controls').innerHTML=`<span class="account-email">${esc(user.email||'Your account')}</span><button class="account-signout" data-action="signout">Sign out</button>`;
     $('#account-label').textContent='Personal practice';$('#sync-toolbar').hidden=false;
     appReady=true;render(false);if(screen==='practice')tick();
