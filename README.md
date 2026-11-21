@@ -32,3 +32,20 @@ Draft results are provisional and kept separate from College Board performance a
 In the app, choose your collection and subject, set your topic counts, and generate a test. Afterward, open **Previous Tests** to review your answers and plan your next session.
 
 QBank is an independent practice tool, not affiliated with College Board or UWorld. Its practice results are not official SAT scores.
+
+
+## Personal error logs
+
+After submitting an answer in Tutor mode, or opening a question from a finished test’s results, use **Your error log** to describe the mistake and click **Save error log**. You can optionally pick or write an error type yourself. Clear the text and save to remove a log.
+
+Open **Error Logs** in the dashboard sidebar. Select an error type to see the original notes and their question attempts, then choose **Review question** to open the passage, answers, and explanation. Existing error-reason selections appear here too. Logs are saved inside the original test history, so existing account sync and history export/import include them without a database migration. Each attempt is kept separately, even when the same question appears in several tests.
+
+### Connect Gemini grouping
+
+Manual logging works immediately. To enable semantic grouping, add `GOOGLE_GENERATIVE_AI_API_KEY` as a **server-only** environment variable in the Vercel project, then redeploy. `GEMINI_MODEL` optionally selects a model available to the key; the default is `gemini-4-argon`. See `.env.example` for the settings. Never add the key to `dist/config.js`, commit it to Git, or expose it in a browser field.
+
+Signed-in users can choose **Group with Gemini** to group existing logs; newly saved logs are grouped automatically when available. Similar wording is assigned to a shared type, while the original note is preserved. A type chosen manually is kept fixed. Tutor logs can be grouped after finishing the test. Only note text and existing type labels are sent to Gemini; passages, answers, and explanations are excluded. Grouping requires account authentication. API failures leave all written logs saved and can be retried from Error Logs.
+
+The endpoint is a Node.js Vercel Function at `/api/error-log-groups`; static hosting alone supports manual logging. It verifies the existing Supabase account token and validates request limits and complete model assignments. For another account backend, configure `SUPABASE_URL` and `SUPABASE_PUBLISHABLE_KEY` alongside the browser’s public config. No service-role key is required.
+
+Run `npm ci` and `npm test` to verify grouping, persistence, legacy reasons, manual overrides, stale edits, authentication, and provider failures. Browser checks should also cover post-submission logging, category navigation, refreshing, editing/removal, and narrow screens. Gemini responses require a real configured API key to verify live.

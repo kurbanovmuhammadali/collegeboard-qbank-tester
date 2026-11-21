@@ -1,0 +1,1 @@
+{"name":"qbank-practice","version":"3.1.0","private":true,"type":"module","scripts":{"test":"node --test tests/*.test.mjs"},"engines":{"node":">=22"},"dependencies":{"@ai-sdk/google":"^4.0.124","@supabase/supabase-js":"^2.119.2","ai":"^7.0.179","zod":"^4.6.7"}}

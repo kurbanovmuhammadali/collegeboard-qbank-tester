@@ -1,6 +1,7 @@
 import { BUCKETS, MATH_BUCKETS, bucketsFor, inCollection, answerMatches, validResponse, LEVELS, belongs, defaultCounts, flattenHistory, skillStats, smartMix, eligiblePool, selectTest } from './engine.mjs';
 import { mountAuth } from './auth.mjs';
 import { AccountStore } from './account-store.mjs';
+import { collectLogs, groupLogs, logText, logType, writeLog, applyAssignments } from './error-logs.mjs';
 
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
@@ -47,6 +48,68 @@ const skillDescriptions = {
   'Transitions':'Logical connections between ideas', 'Rhetorical Synthesis':'Use notes to meet a writing goal'
 };
 const reasons = ['Not specified','Misread the prompt','Knowledge gap','Rushed the answer','Ran out of time','Changed a correct answer','Other reason'];
+let groupingBusy=false, groupingMessage='';
+function errorLogEditor(row, sessionId, questionId) {
+  const types=groupLogs(collectLogs(data.history,byId));
+  return `<form class="error-log-editor" data-log-session="${esc(sessionId)}" data-log-question="${esc(questionId)}">
+    <h3>Your error log</h3><p class="subtle">What went wrong? Write it in your own words, then save it to Error Logs.</p>
+    <label for="personal-error-log">What caused the mistake?</label><textarea id="personal-error-log" name="errorLog" maxlength="2000" placeholder="For example: I didn’t understand the text">${esc(logText(row))}</textarea>
+    <label for="personal-error-type">Error type (optional)</label><input id="personal-error-type" name="errorType" maxlength="100" list="error-types" value="${esc(row.errorTypeManual?logType(row):'')}" placeholder="Choose a type, or let AI group it"><datalist id="error-types">${types.map(g=>`<option value="${esc(g.label)}"></option>`).join('')}</datalist>
+    ${logType(row)?`<p class="subtle">Current type: <strong>${esc(logType(row))}</strong></p>`:''}
+    <div class="error-log-actions"><button class="button primary" type="submit">Save error log</button><a href="#error-logs">View Error Logs</a></div><p class="subtle" role="status" data-log-status></p>
+  </form>`;
+}
+function errorLogsPage(group='') {
+  const entries=collectLogs(data.history,byId), groups=groupLogs(entries);
+  let key;try{key=decodeURIComponent(group);}catch{key='';}
+  const selected=groups.find(g=>g.key===key);
+  return `<div class="toolbar"><div><p class="subtle">Keep track of why mistakes happen. Select an error type to revisit its questions.</p><p class="subtle">Gemini groups similar wording while keeping your original log. Types you choose yourself stay fixed.</p></div><button class="button" data-action="group-error-logs" ${groupingBusy||!entries.some(e=>logText(e.row)&&!e.row.errorTypeManual)?'disabled':''}>${groupingBusy?'Grouping…':'Group with Gemini'}</button></div><p class="subtle" role="status" id="grouping-status">${esc(groupingMessage)}</p>
+    <div class="metric-row">${metric('Saved error logs',entries.length)}${metric('Error types',groups.length)}</div>
+    <section class="section"><h2 class="section-title">Error types</h2>${groups.length?`<div class="error-type-grid">${groups.map(g=>`<a class="error-type-card ${selected===g?'selected':''}" href="#error-logs/${encodeURIComponent(g.key)}" ${selected===g?'aria-current="page"':''}><strong>${esc(g.label)}</strong><span>${g.entries.length} ${g.entries.length===1?'question':'questions'} ${icon('arrow-right')}</span></a>`).join('')}</div>`:'<div class="empty"><p>No error logs yet.</p><p>After submitting a test, open a question’s Review page and write what went wrong. In Tutor mode, you can write after submitting each answer.</p><a class="button primary" href="#history">Review previous tests</a></div>'}</section>
+    ${group&&!selected?'<div class="notice">This error type no longer exists. Select one above.</div>':''}
+    ${selected?`<section class="section"><h2 class="section-title">${esc(selected.label)}</h2><div class="error-log-list">${selected.entries.map(e=>`<article class="error-log-item"><div><p class="saved-notes">${esc(e.text)}</p><p class="subtle">${esc(e.question.section)} · ${esc(e.question.skill)} · ${esc(e.session.name)} · ${date(e.session.ended)}</p>${statusFor(e.row)}</div><a class="button" href="#review/${encodeURIComponent(e.session.id)}/${encodeURIComponent(e.row.id)}">Review question</a></article>`).join('')}</div></section>`:''}`;
+}
+async function groupErrorLogs(entries, statusElement) {
+  if(groupingBusy)return;
+  if(!entries.length)return;
+  const epoch=accountEpoch;
+  const setStatus=message=>{if(epoch!==accountEpoch)return;groupingMessage=message;const el=statusElement?.isConnected?statusElement:$('#grouping-status');if(el)el.textContent=message;};
+  if(!account){setStatus('Error log saved on this device. Sign in to use Gemini grouping.');return;}
+  groupingBusy=true;
+  document.querySelectorAll('[data-action="group-error-logs"]').forEach(b=>b.disabled=true);
+  setStatus('Saved. Gemini is grouping similar error logs…');
+  try {
+    const {data:sessionData,error}=await authController.client.auth.getSession();
+    if(error||!sessionData.session)throw Error('Your log is saved. Sign in again to group with Gemini.');
+    for(let start=0;start<entries.length;start+=50){
+      if(epoch!==accountEpoch)return;
+      const batch=entries.slice(start,start+50);
+      const response=await fetch('/api/error-log-groups',{method:'POST',headers:{'Content-Type':'application/json',Authorization:'Bearer '+sessionData.session.access_token},body:JSON.stringify({logs:batch.map(e=>({id:e.key,text:e.text})),types:groupLogs(collectLogs(data.history,byId)).map(g=>g.label).slice(0,100)}),signal:AbortSignal.timeout(60000)});
+      const result=await response.json().catch(()=>({}));
+      if(!response.ok)throw Error(result.error||'Gemini grouping is unavailable. Your logs are saved; try again later.');
+      if(!Array.isArray(result.assignments))throw Error('Gemini returned an invalid result. Your logs are saved.');
+      if(epoch!==accountEpoch)return;
+      applyAssignments(batch,result.assignments);save();
+    }
+    setStatus('Saved and grouped with Gemini. You can edit the type when reviewing a question.');
+    if(screen==='error-logs')render();
+  } catch(error){setStatus(error.name==='TimeoutError'?'Gemini took too long. Your logs are saved; try grouping again.':error.message);}
+  finally{if(epoch===accountEpoch){groupingBusy=false;document.querySelectorAll('[data-action="group-error-logs"]').forEach(b=>b.disabled=false);}}
+}
+document.addEventListener('submit',event=>{
+  const form=event.target.closest('.error-log-editor');if(!form)return;
+  event.preventDefault();
+  const sid=form.dataset.logSession,qid=form.dataset.logQuestion;
+  const row=sid==='active'?(data.active?.ids[data.active.index]===qid&&currentR()?.locked?currentR():null):data.history.find(s=>s.id===sid)?.rows.find(r=>r.id===qid);
+  if(!row)return;
+  const status=form.querySelector('[data-log-status]');
+  try{writeLog(row,form.elements.errorLog.value,form.elements.errorType.value);save();status.textContent=logText(row)?'Error log saved.':'Error log removed.';
+    if(logText(row)&&!row.errorTypeManual){
+      if(sid==='active'){status.textContent='Saved. You can group this log with Gemini after finishing the test.';}
+      else{const entry=collectLogs(data.history,byId).find(e=>e.session.id===sid&&e.row===row);void groupErrorLogs([entry],status);}
+    }
+  }catch(error){status.textContent=error.message;}
+});
 function save() {
   if(!appReady)return;
   if(accountStore){accountStore.save(data);return;}
@@ -149,7 +212,7 @@ function examPage() {
   return `<div class="exam-shell ${q.section==='Math'?'math-exam':''} ${q.source==='uworld'?'draft-exam':''}" style="--reading-size:${readingSize}px"><header class="exam-header"><div><div class="exam-heading">${q.section==='Math'?'Math':'Section 1: Reading and Writing'}${q.source==='uworld'?' · Draft key':''}</div><button class="exam-link" data-action="directions">Directions ${icon('chevron-down')}</button></div><div class="exam-timer ${s.timed&&s.remaining<=300?'warning':''}">${timerMarkup(s)}</div><div class="exam-tools"><button class="exam-tool" data-action="notes" aria-expanded="${notesOpen}">${icon(q.section==='Math'||q.source==='uworld'?'notebook-pen':'highlighter')}<span>${q.section==='Math'||q.source==='uworld'?'Notes':'Highlights &amp; Notes'}</span></button><button class="exam-tool" data-action="more" aria-expanded="${moreOpen}">${icon('ellipsis-vertical')}<span>More</span></button>${moreOpen?`<div class="more-menu"><button data-action="pause">Pause Test</button><button data-action="navigator">Review Questions</button><div class="size-controls">Text size <button data-action="smaller" aria-label="Decrease text size">−</button><button data-action="larger" aria-label="Increase text size">+</button></div><button data-action="finish">End Test</button></div>`:''}</div></header>
   <div class="exam-content"><section class="exam-passage" id="question-area" aria-label="Question content">${figures(q)}<div id="source-text">${formattedSource(q,parts.source,r.highlights||[])}</div></section><section class="exam-answer-pane" aria-label="Question and answers"><div class="question-strip"><span class="question-number">${s.index+1}</span><button class="mark-review ${r.flag?'marked':''}" data-action="flag" aria-pressed="${r.flag}">${icon('bookmark')}Mark for Review</button><button ${q.responseType==='numeric'?'hidden':''} class="eliminate-toggle ${eliminator?'active':''}" data-action="eliminator" title="Option eliminator" aria-label="Toggle option eliminator" aria-pressed="${eliminator}">ABC</button></div><p class="exam-prompt">${esc(parts.prompt)}</p>${q.source==='uworld'&&q.section!=='Math'?sourceImages(q.questionImages,q.id):''}${q.responseType==='numeric'?`<div class="numeric-response"><label for="numeric-answer">Your answer</label><input id="numeric-answer" type="text" inputmode="text" autocomplete="off" maxlength="30" placeholder="e.g. 3/4 or 0.75" value="${esc(r.answer||'')}" ${r.locked?'disabled':''} aria-describedby="numeric-help"><p id="numeric-help" class="subtle">Enter a number, decimal, or fraction.</p><p id="numeric-error" class="error" role="status"></p></div>`:`<div class="answer-list ${q.source==='uworld'?'screenshot-answers':''}" role="radiogroup" aria-label="Answer choices">${['A','B','C','D'].map(a=>`<div class="answer-row"><button class="answer-choice ${r.answer===a?'selected':''} ${r.eliminated?.includes(a)?'eliminated':''}" role="radio" aria-label="Answer ${a}" aria-checked="${r.answer===a}" data-answer="${a}" ${r.locked?'disabled':''}><span class="choice-letter">${a}</span><span class="choice-text">${esc(q.choices[a]).replace(/\s+/g,' ')}</span></button>${eliminator?`<button class="eliminate-choice" data-eliminate="${a}" aria-label="${r.eliminated?.includes(a)?'Restore':'Eliminate'} option ${a}" ${r.locked?'disabled':''}>${r.eliminated?.includes(a)?'Undo':icon('circle-minus')}</button>`:''}</div>`).join('')}</div>`}
 
-  ${s.mode==='tutor'?`<div class="exam-submit"><button class="exam-button secondary" data-action="check" ${!r.answer||r.locked?'disabled':''}>Submit Answer</button></div>${r.locked?`<div class="tutor-feedback"><strong>${q.source==='uworld'?(isCorrect({id:q.id,...r})?'Matches draft':'Differs from draft'):(isCorrect({id:q.id,...r})?'Correct':'Incorrect')} · ${q.source==='uworld'?'Draft answer':'Correct answer'}: ${esc(q.answer)}</strong><div class="explanation">${q.source==='uworld'?'<p class="draft-inline">AI draft · needs review · not an official UWorld key</p>':''}${explanation(q)}</div></div>`:''}`:''}</section></div>
+  ${s.mode==='tutor'?`<div class="exam-submit"><button class="exam-button secondary" data-action="check" ${!r.answer||r.locked?'disabled':''}>Submit Answer</button></div>${r.locked?`<div class="tutor-feedback"><strong>${q.source==='uworld'?(isCorrect({id:q.id,...r})?'Matches draft':'Differs from draft'):(isCorrect({id:q.id,...r})?'Correct':'Incorrect')} · ${q.source==='uworld'?'Draft answer':'Correct answer'}: ${esc(q.answer)}</strong><div class="explanation">${q.source==='uworld'?'<p class="draft-inline">AI draft · needs review · not an official UWorld key</p>':''}${explanation(q)}</div>${errorLogEditor(r,'active',q.id)}</div>`:''}`:''}</section></div>
   <footer class="exam-footer"><span class="test-label">${esc(s.name)}</span><button class="question-menu-trigger" data-action="navigator">Question ${s.index+1} of ${s.ids.length} ${icon('chevron-up')}</button><div class="exam-nav"><button class="exam-button" data-jump="${s.index-1}" ${s.index===0?'disabled':''}>Back</button><button class="exam-button" ${s.index===s.ids.length-1?'data-action="review-test"':`data-jump="${s.index+1}"`}>${s.index===s.ids.length-1?'Review':'Next'}</button></div></footer>
   ${notesOpen?`<aside class="notes-panel" aria-label="Highlights and Notes"><div class="row"><h3>Highlights &amp; Notes</h3><button class="icon-button" data-action="notes" aria-label="Close notes">${icon('x')}</button></div><p>${q.section==='Math'||q.source==='uworld'?'Add your working or a reminder for this question.':'Select passage text, then use Highlight selection.'}</p><div ${q.section==='Math'||q.source==='uworld'?'hidden':''}><button class="button" data-action="highlight">Highlight selection</button><button class="button" style="margin-top:8px" data-action="clear-highlights">Clear highlights</button></div><label class="subtle" style="display:block;margin-top:18px" for="question-note">Notes for this question</label><textarea id="question-note" placeholder="Add a note…">${esc(r.notes||'')}</textarea></aside>`:''}</div>`;
 }
@@ -223,13 +286,13 @@ function resultPage(id) {
   const t=tally(s.rows),draft=s.rows.some(r=>byId[r.id]?.answerStatus==='draft');
   return `${draft?draftNotice():''}`+ `<div class="toolbar"><a class="button" href="#history">Back to Previous Tests</a><span class="subtle">${esc(s.name)} · ${date(s.ended)}${s.expired?' · Time limit reached':''}</span></div><div class="metric-row">${metric('Total Questions',t.total)}${metric(draft?'Matches draft':'Correct Answers',t.correct,`${t.accuracy}% ${draft?'draft agreement':'accuracy'}`)}${metric(draft?'Differs from draft':'Incorrect Answers',t.incorrect)}${metric('Omitted',t.omitted)}</div>
   <section class="section"><h2 class="section-title">Knowledge and Skills</h2><div class="section-body domain-grid">${domainPanels(s.rows)}</div></section><section class="section"><h2 class="section-title">Question Types</h2>${skillTable(s.rows)}</section>
-  <section class="section"><h2 class="section-title">Questions Overview</h2><div class="section-body row"><span class="subtle">Active time ${fmt(s.rows.reduce((a,r)=>a+r.seconds,0))}</span><label class="subtle">Filter <select id="result-filter"><option value="all">All questions</option><option value="incorrect">${draft?'Differs from draft':'Incorrect'}</option><option value="omitted">Omitted</option><option value="correct">${draft?'Matches draft':'Correct'}</option></select></label></div><div class="table-scroll"><table class="data-table"><thead><tr><th>No.</th><th>Question type</th><th>Your answer</th><th>${draft?'Draft answer':'Correct answer'}</th><th>Result</th><th>Time</th><th></th></tr></thead><tbody>${s.rows.map((r,i)=>`<tr data-outcome="${!r.answer?'omitted':isCorrect(r)?'correct':'incorrect'}"><td>${i+1}</td><td>${esc(byId[r.id].skill)}</td><td>${esc(r.answer||'—')}</td><td>${byId[r.id].answer}</td><td>${statusFor(r)}</td><td>${fmt(r.seconds)}</td><td><a href="#review/${s.id}/${r.id}">Review</a></td></tr>`).join('')}</tbody></table></div></section><div class="builder-actions"><a class="button primary" href="#create">Create Test</a></div>`;
+  <section class="section"><h2 class="section-title">Questions Overview</h2><div class="section-body row"><span class="subtle">Active time ${fmt(s.rows.reduce((a,r)=>a+r.seconds,0))}</span><label class="subtle">Filter <select id="result-filter"><option value="all">All questions</option><option value="incorrect">${draft?'Differs from draft':'Incorrect'}</option><option value="omitted">Omitted</option><option value="correct">${draft?'Matches draft':'Correct'}</option></select></label></div><div class="table-scroll"><table class="data-table"><thead><tr><th>No.</th><th>Question type</th><th>Your answer</th><th>${draft?'Draft answer':'Correct answer'}</th><th>Result</th><th>Time</th><th></th></tr></thead><tbody>${s.rows.map((r,i)=>`<tr data-outcome="${!r.answer?'omitted':isCorrect(r)?'correct':'incorrect'}"><td>${i+1}</td><td>${esc(byId[r.id].skill)}</td><td>${esc(r.answer||'—')}</td><td>${byId[r.id].answer}</td><td>${statusFor(r)}</td><td>${fmt(r.seconds)}</td><td><a href="#review/${s.id}/${r.id}">Review${logType(r)?' · Error logged':' / Add error log'}</a></td></tr>`).join('')}</tbody></table></div></section><div class="builder-actions"><a class="button" href="#error-logs">Error Logs</a><a class="button primary" href="#create">Create Test</a></div>`;
 }
 function reviewPage(sid,qid) {
   const s=data.history.find(s=>s.id===sid),r=s?.rows.find(r=>r.id===qid),q=byId[qid];if(!r||!q)return '<div class="empty">Question not found.</div>';
   const parts=splitQuestion(q);
   return `${q.source==='uworld'?draftNotice():''}<div class="toolbar"><a class="button" href="#result/${s.id}">Back to Results</a><span class="subtle">${q.id} · ${q.domain} · ${q.skill}</span></div><section class="section"><h2 class="section-title">${statusFor(r)} ${esc(q.skill)}</h2><div class="review-layout"><div class="review-source">${figures(q)}${formattedSource(q,parts.source,r.highlights||[])}</div><div class="review-answers"><p style="font:18px/1.6 Georgia,serif">${esc(parts.prompt)}</p>${q.source==='uworld'&&q.section!=='Math'?sourceImages(q.questionImages,q.id):''}${q.responseType==='numeric'?`<p>Your answer: <strong>${esc(r.answer||'Omitted')}</strong></p><p>${q.source==='uworld'?'Draft answer':'Correct answer'}: <strong>${esc(q.answer)}</strong></p>`:''}${Object.entries(q.choices).map(([a,text])=>`<div class="review-choice ${a===q.answer?'correct':a===r.answer?'wrong':''}"><span class="choice-letter">${a}</span><span>${esc(text).replace(/\s+/g,' ')}</span>${a===q.answer?(q.source==='uworld'?'<small>Draft answer</small>':'<small>Correct answer</small>'):a===r.answer?'<small>Your answer</small>':''}</div>`).join('')}</div></div></section>
-  <section class="section"><h2 class="section-title">Explanation</h2><div class="rationale">${explanation(q)}</div></section><section class="section"><h2 class="section-title">Your Activity</h2><div class="section-body"><p class="subtle">${fmt(r.seconds)} · ${r.visits||1} visits · ${r.changes?.length||0} answer changes</p>${r.changes?.length?`<p class="subtle">${r.changes.map(c=>`${esc(c.from||'—')} → ${esc(c.to||'—')} at ${fmt(c.at)}`).join(' · ')}</p>`:''}<label class="subtle" for="error-reason">Error reason</label><select id="error-reason" class="reason-select" data-reason="${s.id}/${q.id}">${reasons.map(v=>`<option ${r.reason===v?'selected':''}>${v}</option>`).join('')}</select>${r.notes?`<h3 style="font-size:15px;margin-top:25px">Your notes</h3><p class="saved-notes">${esc(r.notes)}</p>`:''}${r.points?.length?`<h3 style="font-size:15px;margin-top:25px">Pointer trace</h3><p class="subtle">Movement within the passage area. This does not identify the cause of an error.</p><svg class="pointer-svg" viewBox="0 0 1000 600"><polyline fill="none" stroke="#4b80a7" stroke-width="2" points="${r.points.map(p=>`${p.x*1000},${p.y*600}`).join(' ')}"/></svg>`:''}</div></section>`;
+  <section class="section"><h2 class="section-title">Error Log</h2><div class="section-body">${errorLogEditor(r,s.id,q.id)}</div></section><section class="section"><h2 class="section-title">Explanation</h2><div class="rationale">${explanation(q)}</div></section><section class="section"><h2 class="section-title">Your Activity</h2><div class="section-body"><p class="subtle">${fmt(r.seconds)} · ${r.visits||1} visits · ${r.changes?.length||0} answer changes</p>${r.changes?.length?`<p class="subtle">${r.changes.map(c=>`${esc(c.from||'—')} → ${esc(c.to||'—')} at ${fmt(c.at)}`).join(' · ')}</p>`:''}<label class="subtle" for="error-reason">Error reason</label><select id="error-reason" class="reason-select" data-reason="${s.id}/${q.id}">${reasons.map(v=>`<option ${r.reason===v?'selected':''}>${v}</option>`).join('')}</select>${r.notes?`<h3 style="font-size:15px;margin-top:25px">Your notes</h3><p class="saved-notes">${esc(r.notes)}</p>`:''}${r.points?.length?`<h3 style="font-size:15px;margin-top:25px">Pointer trace</h3><p class="subtle">Movement within the passage area. This does not identify the cause of an error.</p><svg class="pointer-svg" viewBox="0 0 1000 600"><polyline fill="none" stroke="#4b80a7" stroke-width="2" points="${r.points.map(p=>`${p.x*1000},${p.y*600}`).join(' ')}"/></svg>`:''}</div></section>`;
 }
 
 function render(preserveScroll=true) {
@@ -238,9 +301,9 @@ function render(preserveScroll=true) {
   const pScroll=preserveScroll?$('.exam-passage')?.scrollTop:0,aScroll=preserveScroll?$('.exam-answer-pane')?.scrollTop:0;
   screen=route;
   document.body.classList.toggle('exam-mode',route==='practice'&&!!data.active);
-  $('#page-title').textContent=({create:'Create Test',home:'Create Test',history:'Previous Tests',performance:'Performance',insights:'Performance',result:'Test Results',review:'Question Review',practice:'Practice Test',library:'UWorld Library',source:'Draft Answer Review'})[route]||'Create Test';
+  $('#page-title').textContent=({create:'Create Test',home:'Create Test',history:'Previous Tests',performance:'Performance',insights:'Performance',result:'Test Results',review:'Question Review',practice:'Practice Test','error-logs':'Error Logs',library:'UWorld Library',source:'Draft Answer Review'})[route]||'Create Test';
   document.querySelectorAll('.sidebar nav a').forEach(a=>a.classList.toggle('active',a.hash==='#'+route||(route==='insights'&&a.hash==='#performance')));
-  $('#app').innerHTML=route==='library'?libraryPage(+qid||0):route==='source'?sourcePage(id):route==='practice'?examPage():route==='history'?historyPage():route==='performance'||route==='insights'?performancePage(id==='sample'):route==='result'?resultPage(id):route==='review'?reviewPage(id,qid):builderPage();
+  $('#app').innerHTML=route==='error-logs'?errorLogsPage(id):route==='library'?libraryPage(+qid||0):route==='source'?sourcePage(id):route==='practice'?examPage():route==='history'?historyPage():route==='performance'||route==='insights'?performancePage(id==='sample'):route==='result'?resultPage(id):route==='review'?reviewPage(id,qid):builderPage();
   window.lucide?.createIcons();
   if(preserveScroll){if($('.exam-passage'))$('.exam-passage').scrollTop=pScroll||0;if($('.exam-answer-pane'))$('.exam-answer-pane').scrollTop=aScroll||0;}
   $('#builder-form')?.addEventListener('submit',e=>{e.preventDefault();startTest();});
@@ -267,7 +330,7 @@ document.addEventListener('change',async e=>{
   if(t.name==='telemetry')builder.telemetry=t.checked;
   if(t.dataset.skillBucket){let arr=builder.skills[t.dataset.skillBucket];builder.skills[t.dataset.skillBucket]=t.checked?[...new Set([...arr,t.value])]:arr.filter(v=>v!==t.value);render();}
   if(t.id==='result-filter')document.querySelectorAll('[data-outcome]').forEach(row=>row.hidden=t.value!=='all'&&row.dataset.outcome!==t.value);
-  if(t.dataset.reason){const [sid,qid]=t.dataset.reason.split('/');data.history.find(s=>s.id===sid).rows.find(r=>r.id===qid).reason=t.value;save();}
+  if(t.dataset.reason){const [sid,qid]=t.dataset.reason.split('/');const row=data.history.find(s=>s.id===sid).rows.find(r=>r.id===qid);row.reason=t.value;if(logText(row)&&t.value!=='Not specified'){row.errorType=t.value;row.errorTypeManual=true;}save();}
   if(t.id==='performance-scope'){const sample=location.hash.endsWith('/sample'),history=sample?sampleHistory():data.history.filter(s=>s.rows.some(r=>!byId[r.id]?.answerStatus)),scope=t.value==='recent'?history.slice(0,3):history;$('#performance-report').innerHTML=performanceReport(allRows(scope),scope.length,smartMix(scope,byId));window.lucide?.createIcons();}
   if(t.id==='import-history'){
     try{const f=t.files[0];if(!f)return;if(f.size>20e6)throw Error('File is too large.');const v=JSON.parse(await f.text());if(![1,2].includes(v.version)||!Array.isArray(v.history))throw Error('Invalid history file.');
@@ -286,6 +349,7 @@ document.addEventListener('click',e=>{
   if(b.dataset.answer&&data.active){tick();if(!data.active)return;const r=currentR();if(r.locked)return;const a=b.dataset.answer;if(r.eliminated?.includes(a))return;if(r.answer!==a&&r.answer)r.changes.push({from:r.answer,to:a,at:r.seconds});r.answer=a;save();render();return;}
   if(b.dataset.eliminate&&data.active){const r=currentR();if(r.locked)return;const a=b.dataset.eliminate;r.eliminated??=[];r.eliminated=r.eliminated.includes(a)?r.eliminated.filter(v=>v!==a):[...r.eliminated,a];if(r.eliminated.includes(a)&&r.answer===a){r.changes.push({from:a,to:null,at:r.seconds});r.answer=null;}save();render();return;}
   switch(b.dataset.action){
+    case'group-error-logs':void groupErrorLogs(collectLogs(data.history,byId).filter(e=>logText(e.row)&&!e.row.errorTypeManual));break;
     case'signout':void authController?.signOut();break;
     case'sync-now':void syncAccount();break;
     case'reload-cloud-draft':if(accountStore)showModal('Reload saved test?', '<p>This replaces the unfinished test on this device with the latest saved test from your account. Your completed tests will be kept.</p>',async()=>{try{data.active=await accountStore.reloadCloudDraft();if(data.active)data.active.paused=true;save();render();}catch{showModal('Could not reload','Check your connection and try again.',()=>{},'OK','');}},'Reload cloud test');break;
@@ -331,6 +395,7 @@ async function syncAccount() {
   catch {if(store===accountStore)syncStatus({kind:'error',text:'Could not refresh history. Check your connection and retry.'});}
 }
 function resetAccount({clearCache=false}={}) {
+  groupingBusy=false;groupingMessage='';
   ++accountEpoch;appReady=false;
   accountStore?.dispose({clearCache});accountStore=null;account=null;
   data={history:[],active:null};
